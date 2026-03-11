@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { ASSETS, SUPPLIERS, SCENARIOS, EVENTS, BOT_ROSTER, TICK_MS, MIN_SOC, MAX_SOC, DA_CYCLE, DA_MS, FREQ_FAIL_LO, FREQ_FAIL_HI, FREQ_FAIL_DURATION, TICK_SPEEDS, FORGIVENESS, GAME_MODES, ROLES, ID_WINDOW_MS, TUTORIAL_STEPS, SCORING_CONFIG, SP_DURATION_H } from "./shared/constants.js";
+import { ASSETS, SUPPLIERS, SCENARIOS, EVENTS, TICK_MS, MIN_SOC, MAX_SOC, DA_CYCLE, DA_MS, FREQ_FAIL_LO, FREQ_FAIL_HI, FREQ_FAIL_DURATION, TICK_SPEEDS, FORGIVENESS, GAME_MODES, ROLES, ID_WINDOW_MS, TUTORIAL_STEPS, SCORING_CONFIG, SP_DURATION_H } from "./shared/constants.js";
 import { clamp, f0, f1, fpp, spTime, uid, roomKey } from "./shared/utils.js";
 import { marketForSp, clearBM, feedbackMarketState, clearDA, computeForecasts } from "./engine/MarketEngine.js";
 import { availMW, updateSoF, initSoF } from "./engine/AssetPhysics.js";
@@ -10,6 +10,7 @@ import { ACHIEVEMENTS, buildAchievementStats, checkAchievements } from "./engine
 import { computeRoleScore, computeSystemScore, computeOverallScore } from "./engine/ScoringEngine.js";
 import { createSystemState, updateSystemState, computePlayerSystemImpact, updatePlayerImpact, buildPlayerStats, buildNesoStats, buildElexonStats } from "./engine/PhysicalEngine.js";
 import { buildLeaderboard, getScoreColor, generatePlayerNarrative, getRankLabel } from "./engine/LeaderboardEngine.js";
+import { clearFullAuction, DEFAULT_DA_SEGMENTS, getVolumeAtPrice } from "./engine/DACurveEngine.js";
 
 
 // Role Screens
@@ -22,7 +23,9 @@ import DsrScreen from './components/roles/DsrScreen';
 // Interconnector is now a system asset, not a player role; its screen is no longer imported
 import BessScreen from './components/roles/BessScreen';
 import WaitingRoom from './components/WaitingRoom';
-
+import { Tip } from './components/shared/Tip';
+import SupplyDemandCurve from './components/shared/SupplyDemandCurve';
+import TwoSidedOrderBook from './components/shared/TwoSidedOrderBook';
 
 /* ─── TOAST ─── */
 function ToastContainer({ toasts }) {
@@ -89,6 +92,9 @@ export default function App() {
   const [myBid, setMyBid] = useState({ mw: 10, price: "" });
   const [daMyBid, setDaMyBid] = useState({ mw: 15, price: "" });
   const [daSubmitted, setDaSubmitted] = useState(false);
+  const [daCurveSegments, setDaCurveSegments] = useState(null); // EPEX piecewise curve segments
+  const [daCurves, setDaCurves] = useState({}); // All players' curves from Gun
+  const [daAuctionResults, setDaAuctionResults] = useState(null); // Full 48-SP auction results
 
   const [lastRes, setLastRes] = useState(null);
   const [daResult, setDaResult] = useState(null);
@@ -123,7 +129,20 @@ export default function App() {
   const [idOrderBook, setIdOrderBook] = useState({});
   const [idMyOrder, setIdMyOrder] = useState({ mw: 10, price: "", side: "buy" });
   const [idSubmitted, setIdSubmitted] = useState(false);
-  const [contractPosition, setContractPosition] = useState(0);  // MW from DA + ID
+  // Position flow: positions[48] is the master array. DA fills all 48 at once.
+  // ID accumulates per-SP. contractPosition is derived for backward compat.
+  const [positions, setPositions] = useState(new Array(48).fill(0));       // MW per SP (DA + ID)
+  const [contracts, setContracts] = useState(new Array(48).fill(0));       // Frozen at gate closure
+  const [daPositions, setDaPositions] = useState(new Array(48).fill(0));   // DA-only volumes (before ID)
+  const contractPosition = positions[Math.max(0, (sp || 1) - 1)] || 0;    // Derived for current SP
+  const setContractPosition = (valOrFn) => {                               // Compat shim for existing code
+    setPositions(prev => {
+      const next = [...prev];
+      const idx = Math.max(0, (sp || 1) - 1);
+      next[idx] = typeof valOrFn === 'function' ? valOrFn(prev[idx]) : valOrFn;
+      return next;
+    });
+  };
   const [imbalancePenalty, setImbalancePenalty] = useState(0);
 
   // ─── BATCH 3: Multi-asset ───
@@ -150,17 +169,11 @@ export default function App() {
     pendingReboundMwh: 0,
   });
 
-  const refs = useRef({}); refs.current = { sp, phase, phaseStartTs, soc, cash, daCash, imbalancePenalty, submitted, pid, name, room, asset, assetConfig, isInstructor, scenarioId: roomScenario, gameMode, role, contractPosition, orderBookSnap: orderBook, daOrderBookSnap: daOrderBook, idOrderBookSnap: idOrderBook, spContracts, players, physicalState, msLeft, tickSpeed };
+  const refs = useRef({}); refs.current = { sp, phase, phaseStartTs, soc, cash, daCash, submitted, pid, name, room, asset, assetConfig, isInstructor, scenarioId: roomScenario, gameMode, role, contractPosition, positions, contracts, daPositions, orderBookSnap: orderBook, daOrderBookSnap: daOrderBook, idOrderBookSnap: idOrderBook, spContracts, players, physicalState, msLeft, tickSpeed, daCurves };
   const prevPhaseRef = useRef({ phase: "INIT", sp: 0 });
   const lastEventRef = useRef(null);
   const gmCfg = GAME_MODES[gameMode] || GAME_MODES.FULL;
   const isForgive = gmCfg.forgiveness;
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      window.gunState = { phase };
-    }
-  }, [phase]);
 
   const handleJoin = useCallback(async (chosenAsset, customConfig = null) => {
     if (!name.trim() || !room.trim() || !chosenAsset || !gun.current) return;
@@ -271,6 +284,15 @@ export default function App() {
     gun.current.get(roomKey(room, `bm_${sp}`)).map().on((data, id) => { if (data && id) setOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
     gun.current.get(roomKey(room, `da_${daCycle}`)).map().on((data, id) => { if (data && id) setDaOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
     gun.current.get(roomKey(room, `id_${sp}`)).map().on((data, id) => { if (data && id) setIdOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
+    // Listen for EPEX DA curve submissions
+    gun.current.get(roomKey(room, "da_curves")).map().on((data, id) => {
+      if (data && id && data.json) {
+        try {
+          const parsed = JSON.parse(data.json);
+          setDaCurves(prev => ({ ...prev, [id]: { ...data, segments: parsed, playerId: id } }));
+        } catch (e) { console.error('[DA Curves] Failed to parse curve:', e); }
+      }
+    });
   }, [sp, screen, room, gun]);
 
   const instructorNextPhase = useCallback(() => {
@@ -345,33 +367,90 @@ export default function App() {
 
     // --- DA CLOSED ---
     if (old.phase === "DA") {
-      const daArr = Object.values(daOrderBookSnap || {}).filter(b => b && b.mw);
-      const daRes = clearDA(daArr, market.forecast);
+      const curveEntries = Object.values(refs.current.daCurves || {});
+      const hasCurves = curveEntries.length > 0 && curveEntries.some(c => c.segments && c.segments.length > 0);
 
-      setSpContracts(prev => {
-        const next = { ...prev };
-        if (!next[old.sp]) next[old.sp] = {};
-        for (const p of Object.values(players)) {
-          const b = daRes.accepted_bids.find(a => a.id === p.id);
-          if (!next[old.sp][p.id]) next[old.sp][p.id] = {};
-          next[old.sp][p.id].daMw = b ? b.mwAcc : 0;
-          next[old.sp][p.id].daPrice = daRes.cp;
-          next[old.sp][p.id].daSide = b ? b.side : null;
+      if (hasCurves) {
+        // ─── EPEX CURVE-BASED CLEARING: all 48 SPs at once ───
+        const playerCurves = curveEntries
+          .filter(c => c.segments && c.segments.length > 0)
+          .map(c => ({ playerId: c.playerId, segments: c.segments, side: c.side || "both" }));
+        const fullResult = clearFullAuction(playerCurves);
+
+        setDaAuctionResults(fullResult);
+
+        // Fill ALL 48 SP positions from auction results
+        const myVolumes = fullResult.volumes[id] || new Array(48).fill(0);
+        setPositions([...myVolumes]);         // DA volumes → position array
+        setDaPositions([...myVolumes]);       // Keep DA-only snapshot for UI
+
+        // Store per-SP contracts for settlement ledger
+        setSpContracts(prev => {
+          const next = { ...prev };
+          for (let spk = 1; spk <= 48; spk++) {
+            const spIdx = spk - 1;
+            const cp = fullResult.prices[spIdx] || 50;
+            if (!next[spk]) next[spk] = {};
+            for (const curve of playerCurves) {
+              const vol = fullResult.volumes[curve.playerId]?.[spIdx] || 0;
+              if (!next[spk][curve.playerId]) next[spk][curve.playerId] = {};
+              next[spk][curve.playerId].daMw = Math.abs(vol);
+              next[spk][curve.playerId].daPrice = cp;
+              next[spk][curve.playerId].daSide = vol >= 0 ? "bid" : "offer";
+            }
+          }
+          return next;
+        });
+
+        // Show DA result for current SP
+        const spIdx = old.sp - 1;
+        const cp = fullResult.prices[spIdx] || 50;
+        const myVol = myVolumes[spIdx] || 0;
+        // Estimate total DA revenue across all 48 SPs
+        const totalDaRev = myVolumes.reduce((sum, vol, i) => {
+          const p = fullResult.prices[i] || 50;
+          const rev = Math.abs(vol) * p * SP_DURATION_H;
+          return sum + (vol < 0 ? rev : -rev); // sellers earn, buyers pay
+        }, 0);
+        setDaCash(totalDaRev);
+
+        if (Math.abs(myVol) > 0.01) {
+          setDaResult({ accepted: true, revenue: totalDaRev, cp, mw: Math.abs(myVol), curveCleared: true, allVolumes: myVolumes, allPrices: fullResult.prices });
+          const totalMw = myVolumes.reduce((s, v) => s + Math.abs(v), 0);
+          addToast({ emoji: "📋", title: "DA Auction Cleared (48 SPs)", body: `Total: ${f0(totalMw)}MW across 48 SPs. SP${old.sp}: ${myVol > 0 ? "BUY" : "SELL"} ${f0(Math.abs(myVol))}MW @ £${f1(cp)}`, col: "#f5b222" });
+        } else {
+          setDaResult({ accepted: false, revenue: 0, cp, mw: 0, curveCleared: true, allVolumes: myVolumes, allPrices: fullResult.prices });
         }
-        return next;
-      });
-
-      const myDa = daRes.accepted_bids.find(a => a.id === id);
-      if (myDa) {
-        const pos = myDa.side === "offer" ? myDa.mwAcc : -myDa.mwAcc;
-        setContractPosition(pos);
-        const daRev = +(myDa.mwAcc * daRes.cp * SP_DURATION_H).toFixed(2); // Keep existing multiplier
-        setDaCash(prev => prev + daRev);
-        setDaResult({ accepted: true, revenue: daRev, cp: daRes.cp, mw: myDa.mwAcc });
-        addToast({ emoji: "📋", title: "DA Auction Cleared", body: `Position: ${pos > 0 ? "+" : ""}${f0(pos)}MW @ £${f1(daRes.cp)}`, col: "#f5b222" });
       } else {
-        setContractPosition(0);
-        setDaResult({ accepted: false, revenue: 0, cp: daRes.cp, mw: 0 });
+        // ─── LEGACY SIMPLE BID CLEARING (fallback: fills only current SP) ───
+        const daArr = Object.values(daOrderBookSnap || {}).filter(b => b && b.mw);
+        const daRes = clearDA(daArr, market.forecast);
+
+        setSpContracts(prev => {
+          const next = { ...prev };
+          if (!next[old.sp]) next[old.sp] = {};
+          for (const p of Object.values(players)) {
+            const b = daRes.accepted_bids.find(a => a.id === p.id);
+            if (!next[old.sp][p.id]) next[old.sp][p.id] = {};
+            next[old.sp][p.id].daMw = b ? b.mwAcc : 0;
+            next[old.sp][p.id].daPrice = daRes.cp;
+            next[old.sp][p.id].daSide = b ? b.side : null;
+          }
+          return next;
+        });
+
+        const myDa = daRes.accepted_bids.find(a => a.id === id);
+        if (myDa) {
+          const pos = myDa.side === "offer" ? myDa.mwAcc : -myDa.mwAcc;
+          setContractPosition(pos);
+          const daRev = +(myDa.mwAcc * daRes.cp * SP_DURATION_H).toFixed(2);
+          setDaCash(prev => prev + daRev);
+          setDaResult({ accepted: true, revenue: daRev, cp: daRes.cp, mw: myDa.mwAcc });
+          addToast({ emoji: "📋", title: "DA Auction Cleared", body: `Position: ${pos > 0 ? "+" : ""}${f0(pos)}MW @ £${f1(daRes.cp)}`, col: "#f5b222" });
+        } else {
+          setContractPosition(0);
+          setDaResult({ accepted: false, revenue: 0, cp: daRes.cp, mw: 0 });
+        }
       }
       setDaSubmitted(false);
     }
@@ -416,7 +495,7 @@ export default function App() {
         for (const [pid, trade] of Object.entries(playerTrades)) {
           if (!next[old.sp][pid]) next[old.sp][pid] = {};
           next[old.sp][pid].idMw = trade.mw;
-          next[old.sp][pid].idPrice = trade.mw > 0 ? trade.money / trade.mw : 0;
+          next[old.sp][pid].idPrice = trade.money / trade.mw;
           next[old.sp][pid].idSide = trade.side;
         }
         return next;
@@ -483,12 +562,7 @@ export default function App() {
         setSpContracts(prev => {
           const next = { ...prev };
           if (!next[settleSp]) next[settleSp] = {};
-
-          let totalImbCash = 0;
-          let numPlayers = 0;
-          const playersArr = Object.values(refs.current.players || {});
-
-          playersArr.forEach(p => {
+          Object.values(refs.current.players || {}).forEach(p => {
             const c = next[settleSp][p.id] || {};
             const pDaRev = c.daMw ? (c.daSide === "offer" ? c.daMw * c.daPrice * SP_DURATION_H : -c.daMw * c.daPrice * SP_DURATION_H) : 0;
             const pIdRev = c.idMw ? (c.idSide === "offer" ? c.idMw * c.idPrice * SP_DURATION_H : -c.idMw * c.idPrice * SP_DURATION_H) : 0;
@@ -530,32 +604,37 @@ export default function App() {
               totalCash: pDaRev + pIdRev + pBmRev + imbCash + operatingCost + startupCost,
             };
             next[settleSp][p.id] = c;
-            totalImbCash += imbCash;
-            numPlayers++;
           });
+          return next;
+        });
 
-          // Calculate BSUoS socialization and apply in same pass
-          const bsuoSCharge = numPlayers > 0 ? -totalImbCash / numPlayers : 0;
+        // Calculate BSUoS socialization
+        const settlements = Object.values(refs.current.spContracts[settleSp] || {});
+        const totalImbCash = settlements.reduce((sum, c) => sum + (c.settlement?.imbCash || 0), 0);
+        const numPlayers = settlements.length;
+        const bsuoSCharge = -totalImbCash / numPlayers;
 
+        // Update spContracts with BSUoS
+        setSpContracts(prev => {
+          const next = { ...prev };
           Object.keys(next[settleSp] || {}).forEach(pid => {
             if (next[settleSp][pid]?.settlement) {
               next[settleSp][pid].settlement.bsuoSCharge = bsuoSCharge;
               next[settleSp][pid].settlement.totalCash += bsuoSCharge;
             }
           });
-
           return next;
         });
 
         // Apply local results for current user
-        const myC = refs.current.spContracts[settleSp]?.[id] || {};
+        const myC = refs.current.spContracts[sp]?.[id] || {};
         const daRev = myC.daMw ? (myC.daSide === "offer" ? myC.daMw * myC.daPrice * SP_DURATION_H : -myC.daMw * myC.daPrice * SP_DURATION_H) : 0;
         const idRev = myC.idMw ? (myC.idSide === "offer" ? myC.idMw * myC.idPrice * SP_DURATION_H : -myC.idMw * myC.idPrice * SP_DURATION_H) : 0;
         const bmRev = myC.bmAccepted?.rev || 0;
 
         const myDef = { ...ASSETS[ak], ...(refs.current.assetConfig || {}) };
         const contractPosMw = refs.current.contractPosition;
-        const actualPosMw = myC.bmAccepted ? (settledMarket.actual.isShort ? myC.bmAccepted.mw : -myC.bmAccepted.mw) : 0;
+        const actualPosMw = myC.bmAccepted ? (market.actual.isShort ? myC.bmAccepted.mw : -myC.bmAccepted.mw) : 0;
 
         const intendedPhysical = contractPosMw + actualPosMw;
         let actualPhysical = intendedPhysical;
@@ -719,9 +798,9 @@ export default function App() {
         // Store physical state at end of settlement for next SP's startup cost determination
         setSpContracts(prev => {
           const next = { ...prev };
-          if (!next[settleSp]) next[settleSp] = {};
-          if (!next[settleSp][id]) next[settleSp][id] = {};
-          next[settleSp][id].physicalAtEndOfSp = { status: pState.status, currentMw: pState.currentMw };
+          if (!next[sp]) next[sp] = {};
+          if (!next[sp][id]) next[sp][id] = {};
+          next[sp][id].physicalAtEndOfSp = { status: pState.status, currentMw: pState.currentMw };
           return next;
         });
 
@@ -802,8 +881,15 @@ export default function App() {
     }
 
     // --- ENTERING NEW SP ---
+    // Position is NOT reset — it persists from DA across all 48 SPs.
+    // Only clear per-SP UI results. Position[SP] was filled by DA, modified by ID.
     if (old.sp !== sp) {
-      setContractPosition(0);
+      // Freeze the old SP's position as its contract (gate closure)
+      setContracts(prev => {
+        const next = [...prev];
+        next[Math.max(0, old.sp - 1)] = refs.current.positions[Math.max(0, old.sp - 1)] || 0;
+        return next;
+      });
       setDaResult(null);
       setLastRes(null);
     }
@@ -896,6 +982,30 @@ export default function App() {
     setDaSubmitted(true); refs.current.daSubmitted = true; setDaOrderBook(p => ({ ...p, [id]: bid }));
     addToast({ emoji: "📋", title: "DA bid submitted", body: `${f0(daMyBid.mw)}MW @ £${daMyBid.price}/MWh`, col: "#f5b222" });
   }, [daMyBid, gun, daSubmitted, addToast]);
+
+  // ─── EPEX DA CURVE SUBMISSION (piecewise linear segments for all 48 SPs) ───
+  const submitDaCurve = useCallback((segments) => {
+    const { pid: id, name: n, room: rm, asset: ak, role } = refs.current;
+    if (!id || !gun.current || !segments || segments.length === 0) return;
+    const def = ASSETS[ak] || {};
+    // Determine side from asset type: generators/BESS sell, suppliers buy, traders both
+    const r = ROLES[role] || {};
+    const side = r.hasDemand ? "buy" : (r.canOwnAssets ? "sell" : "both");
+    // Serialize segments to JSON for Gun.js (Gun can't handle nested arrays)
+    gun.current.get(roomKey(rm, "da_curves")).get(id).put({
+      json: JSON.stringify(segments),
+      side,
+      name: n,
+      asset: ak,
+      col: def.col || "#38c0fc",
+      ts: Date.now(),
+    });
+    setDaCurveSegments(segments);
+    setDaSubmitted(true);
+    const totalSPs = segments.reduce((s, seg) => s + (seg.spEnd - seg.spStart + 1), 0);
+    const maxVol = Math.max(...segments.map(s => s.pmax));
+    addToast({ emoji: "📋", title: "DA Curve Submitted", body: `${segments.length} segments, ${totalSPs} SPs, up to ${f0(maxVol)}MW`, col: "#f5b222" });
+  }, [gun, addToast]);
 
   const submitIdOrder = useCallback(() => {
     const { pid: id, name: n, room: rm, asset: ak, sp: t } = refs.current;
@@ -1011,11 +1121,15 @@ export default function App() {
       // ─── Scoring Engine data ───
       playerScores, leaderboardData, systemState, overallScoreHistory,
       getScoreColor, getRankLabel, generatePlayerNarrative,
+      // ─── EPEX DA Curve data ───
+      daCurveSegments, setDaCurveSegments, onDaCurveSubmit: submitDaCurve,
+      daAuctionResults, daCurves,
+      // ─── Position flow (48-SP arrays) ───
+      positions, daPositions, contracts,
     };
 
     switch (role) {
-      case "NESO":
-      case "instructor": return <NESOScreen {...commonProps} />;
+      case "NESO": return <NESOScreen {...commonProps} />;
       case "ELEXON": return <ElexonScreen {...commonProps} />;
       case "GENERATOR": return <GeneratorScreen {...commonProps} />;
       case "BESS": return <BessScreen {...commonProps} />;
