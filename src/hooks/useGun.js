@@ -7,9 +7,11 @@ export function useGun() {
     useEffect(() => {
         const relay = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_GUN_RELAY)
             ? import.meta.env.VITE_GUN_RELAY
-            : (typeof window !== 'undefined' && window.location && window.location.hostname)
-                ? `${window.location.origin}/gun`
-                : null;
+            : (typeof window !== 'undefined' && window.location && window.location.hostname === 'localhost')
+                ? 'http://localhost:8765/gun'
+                : (typeof window !== 'undefined' && window.location && window.location.origin)
+                    ? `${window.location.origin}/gun`
+                    : null;
         const peers = relay ? [relay] : GUN_PEERS;
 
         if (window.Gun) { gunRef.current = new window.Gun(peers); setReady(true); return; }

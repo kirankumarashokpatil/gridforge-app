@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ASSETS, SUPPLIERS, SCENARIOS, EVENTS, TICK_MS, MIN_SOC, MAX_SOC, DA_CYCLE, DA_MS, FREQ_FAIL_LO, FREQ_FAIL_HI, FREQ_FAIL_DURATION, TICK_SPEEDS, FORGIVENESS, GAME_MODES, ROLES, ID_WINDOW_MS, TUTORIAL_STEPS, SCORING_CONFIG, SP_DURATION_H } from "./shared/constants.js";
 import { clamp, f0, f1, fpp, spTime, uid, roomKey } from "./shared/utils.js";
 import { marketForSp, clearBM, feedbackMarketState, clearDA, computeForecasts } from "./engine/MarketEngine.js";
-import { availMW, updateSoF, initSoF } from "./engine/AssetPhysics.js";
+import { availMW, availMWDirectional, updateSoF, initSoF } from "./engine/AssetPhysics.js";
 import { computeImbalanceSettlement } from "./engine/SettlementEngine.js";
 import { canSubmitBmBid } from "./engine/GateLogic.js";
 import { useGun, useToasts } from "./hooks/useGun.js";
@@ -199,7 +199,7 @@ export default function App() {
   }, [name, room, gun, isInstructor, scenarioId, role]);
 
   useEffect(() => {
-    if (screen !== "game" || !gun.current || !room) return;
+    if ((screen !== "game" && screen !== "waiting_room") || !gun.current || !room) return;
     gun.current.get(roomKey(room, "players")).map().on((data, id) => { if (data && id && data.name) setPlayers(p => ({ ...p, [id]: { ...data, id } })); });
 
     const metaRef = gun.current.get(roomKey(room, "meta"));
@@ -213,15 +213,36 @@ export default function App() {
       if (data?.phaseStartTs) setPhaseStartTs(data.phaseStartTs);
       if (data?.tickSpeed) setTickSpeed(data.tickSpeed);
       if (data?.paused !== undefined) setPaused(data.paused);
+      // Transition from waiting_room to game when host starts
+      if (data?.roomState === 'RUNNING') {
+        setScreen(prev => {
+          if (prev === 'waiting_room') {
+            // Roles without physical assets go through game_no_asset
+            const noAssetRoles = ['NESO', 'ELEXON', 'TRADER', 'SUPPLIER'];
+            const currentRole = refs.current.role;
+            return noAssetRoles.includes(currentRole) ? 'game_no_asset' : 'game';
+          }
+          return prev;
+        });
+      }
     });
 
     // CRITICAL FIX: For late joiners, also read current value to catch in-flight updates
     // This ensures that if the host advanced phase before all subscriptions were ready,
-    // late joiners will still see the current phase.
+    // late joiners will still see the current phase and room state.
     metaRef.once(data => {
       if (data?.phase) {
         console.log('[GunDB] Initial phase read (after subscription):', data.phase);
         setPhase(data.phase);
+      }
+      if (data?.roomState === 'RUNNING') {
+        setScreen(prev => {
+          if (prev === 'waiting_room') {
+            const noAssetRoles = ['NESO', 'ELEXON', 'TRADER', 'SUPPLIER'];
+            return noAssetRoles.includes(refs.current.role) ? 'game_no_asset' : 'game';
+          }
+          return prev;
+        });
       }
     });
 
@@ -960,14 +981,28 @@ export default function App() {
     const m = marketForSp(t, refs.current.scenarioId, [], publishedForecast);
     const isTraderRole = ROLES[role]?.canOwnAssets === false;
     const def = { ...ASSETS[ak], ...(assetConfig || {}) };
-    const avail = isTraderRole ? Infinity : availMW(def, s, m);
+
+    // Use the exact same market evaluation as the host screen does, safely resolving isShort from the market object
+    const isSystemShort = m?.actual?.isShort ?? m?.forecast?.isShort ?? m?.isShort ?? false;
+    const bidSide = isTraderRole && myBid.side ? myBid.side : (isSystemShort ? "offer" : "bid");
+
+    // For BM phase, validate against directional availability (BESS can bid either way)
+    let avail;
+    if (isTraderRole) {
+      avail = Infinity;
+    } else if (def.kind === "soc") {
+      const directional = availMWDirectional(def, s);
+      avail = bidSide === "offer" ? directional.discharge : directional.charge;
+    } else {
+      avail = availMW(def, s, m);
+    }
     if (!isTraderRole && +myBid.mw > avail + 0.5) { alert(`⚠ Max available: ${f0(avail)} MW`); return; }
-    const bidSide = isTraderRole && myBid.side ? myBid.side : (m.actual.isShort ? "offer" : "bid");
+
     const bid = { id, name: n, asset: ak, mw: +myBid.mw, price: +myBid.price, side: bidSide, col: def.col, isBot: false };
     gun.current.get(roomKey(rm, `bm_${t}`)).get(id).put(bid);
     setSubmitted(true); setOrderBook(p => ({ ...p, [id]: bid }));
     addToast({ emoji: "📤", title: "BM bid submitted", body: `${f0(myBid.mw)}MW @ £${myBid.price}/MWh`, col: "#38c0fc" });
-  }, [myBid, gun, addToast]);
+  }, [myBid, gun, addToast, publishedForecast]);
 
   const submitDaBid = useCallback(() => {
     const { pid: id, name: n, room: rm, asset: ak, sp: t, role } = refs.current;
@@ -1049,10 +1084,11 @@ export default function App() {
   const sc = SCENARIOS[roomScenario] || SCENARIOS.NORMAL;
 
   if (screen === "lobby") return <LobbyScreen name={name} setName={setName} room={room} setRoom={setRoom} gunReady={ready} onNext={() => {
-    // When joining from Lobby, go to Waiting Room
+    // When joining from Lobby, go to Waiting Room and generate stable PID
+    if (!pid) setPid(uid());
     setScreen("waiting_room");
   }} />;
-  if (screen === "waiting_room") return <WaitingRoom gun={gun.current} gunReady={ready} room={room} name={name} pid={pid || uid()} setPid={setPid} role={role} setRole={setRole} setScreen={setScreen} isHost={isInstructor} setIsHost={setIsInstructor} gameMode={gameMode} setGameMode={setGameMode} scenarioId={scenarioId} setScenarioId={setScenarioId} players={players} />;
+  if (screen === "waiting_room") return <WaitingRoom gun={gun.current} gunReady={ready} room={room} name={name} pid={pid} setPid={setPid} role={role} setRole={setRole} setScreen={setScreen} isHost={isInstructor} setIsHost={setIsInstructor} gameMode={gameMode} setGameMode={setGameMode} scenarioId={scenarioId} setScenarioId={setScenarioId} players={players} />;
   if (screen === "asset") return <AssetScreen onSelect={handleJoin} playerName={name} room={room} scenario={sc} role={role} />;
   if (screen === "game_no_asset") return (
     <div style={{ background: "#050e16", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", color: "#38c0fc" }}>

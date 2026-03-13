@@ -350,7 +350,7 @@ export default function GeneratorScreen(props) {
                             <input type="number" value={myBid.price} placeholder={`~£${f0((isShort ? sbp * SYSTEM_PARAMS.bidStrategyMultipliers.genBM.sbpMultiplier : ssp * SYSTEM_PARAMS.bidStrategyMultipliers.genBM.sspMultiplier))}`} disabled={submitted || phase !== "BM"} onChange={e => setMyBid(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#1de98b", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
                         </div>
                     </div>
-                    {def.minMw && Number(myBid.mw) > 0 && Number(myBid.mw) < def.minMw && (
+                    {!!def.minMw && Number(myBid.mw) > 0 && Number(myBid.mw) < def.minMw && (
                         <div style={{
                             marginTop: 8, marginBottom: 8, padding: "8px 12px", borderRadius: 6,
                             background: "#1f0709", border: "1px solid #f0455a88",

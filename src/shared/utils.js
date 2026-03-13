@@ -7,5 +7,9 @@ export const spTime = sp => {
     const m = ((sp - 1) * 30) % 60;
     return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 };
-export const uid = () => "p_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 5);
+export const uid = () => {
+    // Generate unique UID per tab instance
+    const tabId = "p_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 9) + "_" + Math.random().toString(36).slice(2, 6);
+    return tabId;
+};
 export const roomKey = (room, suffix) => `gf_v4_${room.toUpperCase()}_${suffix}`;

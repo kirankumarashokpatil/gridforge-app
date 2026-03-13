@@ -3,23 +3,55 @@ import { clamp } from '../shared/utils.js';
 
 export function availMW(def, sofuel, market) {
     if (!def) return 0;
-    const { isShort, wf, sf } = market;
+    // Handle market object structure (can be market, market.actual, or market.forecast)
+    const isShort = market?.actual?.isShort ?? market?.forecast?.isShort ?? market?.isShort ?? false;
+    const wf = market?.actual?.wf ?? market?.forecast?.wf ?? market?.wf ?? 0.5;
+    const sf = market?.actual?.sf ?? market?.forecast?.sf ?? market?.sf ?? 0.5;
 
     if (def.kind === "soc") {
         // Energy-based limit: (Current Energy / Time)
-        const energyLimitMW = isShort
-            ? ((sofuel - MIN_SOC) / 100 * def.maxMWh * (def.eff || 1)) / SP_DURATION_H
-            : ((MAX_SOC - sofuel) / 100 * def.maxMWh / (def.eff || 1)) / SP_DURATION_H;
-        
+        // For BESS, if system is Short we want to Discharge (sell), if Long we want to Charge (buy)
+        // In BM phase, players generally offer to help the system (but BESS can offer either way).
+        // Let's return the max possible MW it can discharge (if we only want a single 'available' number).
+        // A better fix is to provide the availability for both directions, but for now we provide max discharge capability
+        // since the UI currently just checks `myBid.mw > avail + 0.5`.
+        const maxDischargeMWh = (sofuel / 100) * (def.maxMWh || 0);
+        const dischargeLimitMW = (maxDischargeMWh * (def.eff || 1)) / (SP_DURATION_H || 0.5);
+
+        const maxChargeMWh = (def.maxMWh || 0) - maxDischargeMWh;
+        const chargeLimitMW = (maxChargeMWh / (def.eff || 1)) / (SP_DURATION_H || 0.5);
+
         // Final clamp by physical hardware rating
-        return clamp(energyLimitMW, 0, def.maxMW);
+        return clamp(isShort ? dischargeLimitMW : chargeLimitMW, 0, def.maxMW || 0);
     }
-    
-    if (def.kind === "wind") return clamp(Math.round(wf * def.maxMW), 0, def.maxMW);
-    if (def.kind === "solar") return clamp(Math.round(sf * def.maxMW), 0, def.maxMW);
-    if (def.kind === "fuel") return clamp(sofuel / SP_DURATION_H, 0, def.maxMW);
-    if (def.kind === "none") return def.maxMW;
-    return 0;
+
+    if (def.kind === "wind") return clamp(Math.round(wf * (def.maxMW || 0)), 0, def.maxMW || 0);
+    if (def.kind === "solar") return clamp(Math.round(sf * (def.maxMW || 0)), 0, def.maxMW || 0);
+    if (def.kind === "fuel") return clamp((sofuel || 0) / (SP_DURATION_H || 0.5), 0, def.maxMW || 0);
+    if (def.kind === "none") return def.maxMW || 0;
+    return def.maxMW || 0; // Default fallback instead of 0
+}
+
+// Directional availability for BM phase where BESS can bid either way regardless of grid state
+export function availMWDirectional(def, sofuel) {
+    if (!def) return { charge: 0, discharge: 0 };
+
+    if (def.kind === "soc") {
+        const maxDischargeMWh = (sofuel / 100) * (def.maxMWh || 0);
+        const dischargeLimitMW = (maxDischargeMWh * (def.eff || 1)) / (SP_DURATION_H || 0.5);
+
+        const maxChargeMWh = (def.maxMWh || 0) - maxDischargeMWh;
+        const chargeLimitMW = (maxChargeMWh / (def.eff || 1)) / (SP_DURATION_H || 0.5);
+
+        return {
+            charge: clamp(chargeLimitMW, 0, def.maxMW || 0),
+            discharge: clamp(dischargeLimitMW, 0, def.maxMW || 0)
+        };
+    }
+
+    // Non-storage assets return same value for both
+    const limit = def.maxMW || 0;
+    return { charge: limit, discharge: limit };
 }
 
 export function updateSoF(def, sofuel, mwAcc, isShort) {

@@ -46,21 +46,28 @@ export default function WaitingRoom({
             } else if (currentHost) {
                 setIsHost(false);
             } else {
-                // No host in local cache yet. Wait 700ms for relay to sync
+                // No host in local cache yet. Wait 1200ms for relay to sync
                 // before claiming, so the first joiner's record has time to arrive.
                 setTimeout(() => {
                     hostNode.once((latest) => {
                         if (!latest?.pid) {
-                            hostNode.put({ pid: id, ts: myTimestamp });
-                            // isHost will be set by the on() watcher above
+                            // Use a transaction to ensure only one host
+                            const hostClaim = { pid: id, ts: myTimestamp };
+                            hostNode.put(hostClaim, (ack) => {
+                                // Verify we're still the host after the put
+                                hostNode.once((current) => {
+                                    setIsHost(current?.pid === id);
+                                });
+                            });
                         }
                         // If latest has a pid, the on() watcher already handled it
                     });
-                }, 700);
+                }, 1200);
             }
         });
 
         playersNode.get(id).once((existing) => {
+            console.log('[WaitingRoom] Creating/updating player:', { id, name, existing });
             playersNode.get(id).put({
                 name: (name || "").trim(),
                 preferredRole: existing?.preferredRole || null,
@@ -90,11 +97,16 @@ export default function WaitingRoom({
     useEffect(() => {
         if (!gun || !room || !pid || !isHost) return;
         setRole("NESO");
-        gun.get(roomKey(room, "players")).get(pid).put({
-            role: "NESO",
-            preferredRole: "NESO",
-            status: "ASSIGNED",
-            ready: true,
+        // Get existing player data first, then update with NESO role while preserving other fields
+        gun.get(roomKey(room, "players")).get(pid).once((existing) => {
+            gun.get(roomKey(room, "players")).get(pid).put({
+                ...existing, // Preserve existing data like name, lastSeen, etc.
+                role: "NESO",
+                preferredRole: "NESO",
+                status: "ASSIGNED",
+                ready: true,
+                lastSeen: Date.now(), // Update lastSeen
+            });
         });
     }, [gun, room, pid, isHost, setRole]);
 
@@ -144,12 +156,32 @@ export default function WaitingRoom({
     }, []);
 
     const activePlayers = Object.values(players).filter(
-        p => p && p.name && now - (p.lastSeen || 0) < 60000
+        p => p && p.name && now - (p.lastSeen || 0) < 120000 // Increased from 60s to 120s
     );
 
     const roleOptions = Object.values(ROLES).filter(r => !r.isSystem && r.id !== "INSTRUCTOR");
     const assignableRoleOptions = roleOptions.filter(r => r.id !== "NESO");
     const myPlayer = pid ? players[pid] : null;
+
+    // Debug: Log player state
+    console.log('[WaitingRoom] Players state:', {
+        totalPlayers: Object.keys(players).length,
+        activePlayers: activePlayers.length,
+        allPlayers: Object.entries(players).map(([id, p]) => ({
+            id,
+            name: p?.name,
+            role: p?.role,
+            preferredRole: p?.preferredRole,
+            assignedAssetKey: p?.assignedAssetKey,
+            preferredAssetKey: p?.preferredAssetKey,
+            lastSeen: p?.lastSeen,
+            ageSec: p?.lastSeen ? Math.floor((now - p.lastSeen) / 1000) : 'unknown'
+        })),
+        myPid: pid,
+        isHost,
+        myPlayer: myPlayer
+    });
+
     const myPreferredRole = isHost ? "NESO" : (myPlayer?.preferredRole || "GENERATOR");
     const myPreferredAssetKey = myPlayer?.preferredAssetKey || "";
     const myAssignedRole = myPlayer?.role;
@@ -195,9 +227,9 @@ export default function WaitingRoom({
 
     return (
         <div style={{
-            background: "#050e16", minHeight: "100vh", display: "flex", alignItems: "flex-start", justifyContent: "center",
+            background: "#050e16", height: "100vh", display: "flex", alignItems: "flex-start", justifyContent: "center",
             fontFamily: "'Outfit', sans-serif", color: "#ddeeff",
-            position: "relative", overflowY: "auto", overflowX: "hidden", padding: "24px 0",
+            position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflowY: "auto", overflowX: "hidden", padding: "24px 0",
         }}>
             {/* Subtle grid background */}
             <div style={{ position: "absolute", inset: 0, backgroundImage: "radial-gradient(#38c0fc08 1px, transparent 1px)", backgroundSize: "32px 32px" }} />
@@ -229,7 +261,28 @@ export default function WaitingRoom({
                     <div style={{
                         background: "#0a1929", border: "1px solid #38c0fc22", borderRadius: 12, padding: 20, marginBottom: 20,
                     }}>
-                        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 2, color: "#38c0fc", marginBottom: 12 }}>YOUR ASSIGNMENT</div>
+                        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 2, color: "#38c0fc", marginBottom: 12 }}>YOUR STATUS</div>
+                        
+                        {/* Clear status indicator */}
+                        <div style={{ 
+                            background: myPlayer?.role && myPlayer?.role !== "UNASSIGNED" ? "#0c1c2a" : "#1a1f2e", 
+                            border: `1px solid ${myPlayer?.role && myPlayer?.role !== "UNASSIGNED" ? "#1de98b44" : "#f5b22244"}`, 
+                            borderRadius: 10, padding: 14, marginBottom: 12 
+                        }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                                <span style={{ fontSize: 24 }}>
+                                    {myPlayer?.role && myPlayer?.role !== "UNASSIGNED" ? ROLES[myPlayer.role]?.emoji : "⏳"}
+                                </span>
+                                <div>
+                                    <div style={{ fontSize: 14, fontWeight: 800, color: myPlayer?.role && myPlayer?.role !== "UNASSIGNED" ? "#1de98b" : "#f5b222" }}>
+                                        {myPlayer?.role && myPlayer?.role !== "UNASSIGNED" ? "ASSIGNED BY NESO" : "WAITING FOR ASSIGNMENT"}
+                                    </div>
+                                    <div style={{ fontSize: 10, color: "#8ab8d0" }}>
+                                        {myPlayer?.role && myPlayer?.role !== "UNASSIGNED" ? ROLES[myPlayer.role]?.name : "Choose your preference below"}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                         
                         {myPlayer?.role && myPlayer?.role !== "UNASSIGNED" ? (
                             <div style={{ background: "#0c1c2a", border: "1px solid #1de98b44", borderRadius: 10, padding: 14 }}>
@@ -280,7 +333,9 @@ export default function WaitingRoom({
                 <div style={{
                     background: "#0a1929", border: "1px solid #38c0fc22", borderRadius: 12, padding: 20, marginBottom: 20,
                 }}>
-                    <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 2, color: "#38c0fc", marginBottom: 12 }}>{isHost ? "ROOM AUTHORITY" : "CHOOSE PREFERRED ROLE"}</div>
+                    <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 2, color: "#38c0fc", marginBottom: 12 }}>
+                        {isHost ? "ROOM AUTHORITY" : "CHOOSE YOUR ROLE PREFERENCE"}
+                    </div>
                     {isHost ? (
                         <div style={{ background: "#0c1c2a", border: "1px solid #38c0fc44", borderRadius: 10, padding: 14, display: "flex", alignItems: "center", gap: 10 }}>
                             <div style={{ fontSize: 22 }}>{ROLES.NESO.emoji}</div>
@@ -291,9 +346,19 @@ export default function WaitingRoom({
                         </div>
                     ) : (
                         <>
+                            <div style={{ background: "#0c1c2a", border: "1px solid #f5b22244", borderRadius: 8, padding: 10, marginBottom: 12 }}>
+                                <div style={{ fontSize: 9, color: "#f5b222", fontWeight: 700, marginBottom: 4 }}>📋 HOW TO JOIN:</div>
+                                <div style={{ fontSize: 8, color: "#8ab8d0", lineHeight: 1.4 }}>
+                                    1. Choose your preferred role below<br/>
+                                    2. If role needs an asset, select your preferred asset<br/>
+                                    3. Wait for NESO to assign you a final role<br/>
+                                    4. Click "READY" when assigned
+                                </div>
+                            </div>
                             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 }}>
                                 {assignableRoleOptions.map(r => (
                                     <button data-testid={`role-${r.id}`} key={r.id} onClick={() => {
+                                        console.log('[WaitingRoom] Role button clicked:', r.id);
                                         if (gun && room && pid) gun.get(roomKey(room, "players")).get(pid).put({ preferredRole: r.id });
                                     }} style={{
                                         background: myPreferredRole === r.id ? "#38c0fc18" : "#0c1c2a",
@@ -315,11 +380,24 @@ export default function WaitingRoom({
                                         onChange={(e) => {
                                             if (gun && room && pid) gun.get(roomKey(room, "players")).get(pid).put({ preferredAssetKey: e.target.value || null });
                                         }}
-                                        style={{ width: "100%", background: "#050e16", border: "1px solid #38c0fc44", borderRadius: 6, color: "#38c0fc", fontSize: 10, padding: "10px" }}
+                                        style={{ 
+                                            width: "100%", 
+                                            background: "#050e16", 
+                                            border: "2px solid #38c0fc", 
+                                            borderRadius: 6, 
+                                            color: "#38c0fc", 
+                                            fontSize: 12, 
+                                            padding: "12px",
+                                            cursor: "pointer",
+                                            outline: "none",
+                                            fontWeight: "600"
+                                        }}
                                     >
-                                        <option value="">No preference</option>
+                                        <option value="" style={{ background: "#050e16", color: "#8ab8d0" }}>No preference</option>
                                         {roleAssetOptions(myPreferredRole).map(asset => (
-                                            <option key={asset.key} value={asset.key}>{asset.name}</option>
+                                            <option key={asset.key} value={asset.key} style={{ background: "#050e16", color: "#38c0fc" }}>
+                                                {asset.emoji} {asset.name} ({asset.tier})
+                                            </option>
                                         ))}
                                     </select>
                                 </div>
@@ -391,7 +469,8 @@ export default function WaitingRoom({
                         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                             {activePlayers.map((p, i) => {
                                 const r = ROLES[p.role] || { emoji: "⏳", name: "Unassigned" };
-                                const preferred = p.preferredRole ? (ROLES[p.preferredRole] || { name: p.preferredRole, emoji: "📝" }) : null;
+                                // For NESO, don't show preferred role since it's assigned
+                                const preferred = p.role === "NESO" ? null : (p.preferredRole ? (ROLES[p.preferredRole] || { name: p.preferredRole, emoji: "📝" }) : null);
                                 const isMe = p.id === pid;
                                 const assetChoices = roleAssetOptions(p.role);
                                 return (

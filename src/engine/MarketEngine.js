@@ -186,7 +186,7 @@ export function marketForSp(sp, scenarioId = "NORMAL", injectedEvents = [], publ
         sf: trueSolar,
         sbp: clamp(trueIsShort ? trueRefPrice * 1.32 : trueRefPrice * 0.82, 10, 900),
         ssp: clamp(trueIsShort ? trueRefPrice * 0.72 : trueRefPrice * 1.22, 5, 800),
-        freq: clamp(50 + clamp(-trueNIV / 190000, -0.4, 0.4) * (0.5 + errRng() * 1.0), 49.3, 50.7),
+        freq: clamp(50 + clamp(-trueNIV / 15000, -0.4, 0.4) * (0.5 + errRng() * 1.0), 49.3, 50.7),
         event,
         trippedAssets,
         baseRef: trueRefPrice,
@@ -419,7 +419,7 @@ export function feedbackMarketState(market, clearResult) {
     const residualNIV = niv - (isShort ? cleared : -cleared);
 
     // Dynamic Frequency based on residual NIV
-    const freqDeviation = clamp(-residualNIV / 190000, -0.4, 0.4);
+    const freqDeviation = clamp(-residualNIV / 15000, -0.4, 0.4);
     const freqRng = rng((market.sp || 1) * 42 + 7);
     const freq = clamp(50 + freqDeviation * (0.5 + freqRng() * 1.0), 49.3, 50.7);
 
