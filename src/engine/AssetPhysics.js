@@ -9,16 +9,15 @@ export function availMW(def, sofuel, market) {
     const sf = market?.actual?.sf ?? market?.forecast?.sf ?? market?.sf ?? 0.5;
 
     if (def.kind === "soc") {
-        // Energy-based limit: (Current Energy / Time)
-        // For BESS, if system is Short we want to Discharge (sell), if Long we want to Charge (buy)
-        // In BM phase, players generally offer to help the system (but BESS can offer either way).
-        // Let's return the max possible MW it can discharge (if we only want a single 'available' number).
-        // A better fix is to provide the availability for both directions, but for now we provide max discharge capability
-        // since the UI currently just checks `myBid.mw > avail + 0.5`.
-        const maxDischargeMWh = (sofuel / 100) * (def.maxMWh || 0);
+        // Energy-based limit respecting MIN_SOC and MAX_SOC
+        const effectiveSoC = clamp(sofuel, MIN_SOC, MAX_SOC);
+        
+        // Discharge: can only discharge down to MIN_SOC
+        const maxDischargeMWh = ((effectiveSoC - MIN_SOC) / 100) * (def.maxMWh || 0);
         const dischargeLimitMW = (maxDischargeMWh * (def.eff || 1)) / (SP_DURATION_H || 0.5);
 
-        const maxChargeMWh = (def.maxMWh || 0) - maxDischargeMWh;
+        // Charge: can only charge up to MAX_SOC
+        const maxChargeMWh = ((MAX_SOC - effectiveSoC) / 100) * (def.maxMWh || 0);
         const chargeLimitMW = (maxChargeMWh / (def.eff || 1)) / (SP_DURATION_H || 0.5);
 
         // Final clamp by physical hardware rating
@@ -37,10 +36,15 @@ export function availMWDirectional(def, sofuel) {
     if (!def) return { charge: 0, discharge: 0 };
 
     if (def.kind === "soc") {
-        const maxDischargeMWh = (sofuel / 100) * (def.maxMWh || 0);
+        // Respect MIN_SOC and MAX_SOC limits
+        const effectiveSoC = clamp(sofuel, MIN_SOC, MAX_SOC);
+        
+        // Discharge: can only discharge down to MIN_SOC
+        const maxDischargeMWh = ((effectiveSoC - MIN_SOC) / 100) * (def.maxMWh || 0);
         const dischargeLimitMW = (maxDischargeMWh * (def.eff || 1)) / (SP_DURATION_H || 0.5);
 
-        const maxChargeMWh = (def.maxMWh || 0) - maxDischargeMWh;
+        // Charge: can only charge up to MAX_SOC
+        const maxChargeMWh = ((MAX_SOC - effectiveSoC) / 100) * (def.maxMWh || 0);
         const chargeLimitMW = (maxChargeMWh / (def.eff || 1)) / (SP_DURATION_H || 0.5);
 
         return {
