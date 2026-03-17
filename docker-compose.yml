@@ -1,22 +1,60 @@
+version: '3.8'
+
 services:
-  gridforge-app:
-    build: .
-    image: gridforge-app
-    container_name: gridforge-app-container
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    container_name: gridforge-db
+    environment:
+      POSTGRES_DB: gridforge
+      POSTGRES_USER: gridforge
+      POSTGRES_PASSWORD: gridforge123
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     ports:
-      - "3000:80"
-    restart: unless-stopped
-  gundb:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gridforge -d gridforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # GridForge FastAPI Server
+  api:
     build:
       context: .
-      dockerfile: Dockerfile.gun
-    image: gundb-relay
-    container_name: gundb-relay-container
+      dockerfile: Dockerfile.fastapi
+    container_name: gridforge-api
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: gridforge
+      DB_PASSWORD: gridforge123
+      DB_NAME: gridforge
+      PORT: 8000
+      ENV: production
     ports:
-      - "8765:8765"
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
-    volumes:
-      - gundb_data:/data
+
+  # GridForge Frontend (Vite)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: gridforge-app
+    environment:
+      VITE_API_URL: http://api:8000
+      NODE_ENV: production
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
 
 volumes:
-  gundb_data:
+  pgdata:

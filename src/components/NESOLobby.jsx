@@ -30,7 +30,7 @@ export default function NESOLobby({
         p => p && p.name && Date.now() - (p.lastSeen || 0) < 60000
     );
 
-    const assignableRoleOptions = Object.values(ROLES).filter(r => !r.isSystem && r.id !== "INSTRUCTOR" && r.id !== "NESO");
+    const assignableRoleOptions = Object.values(ROLES).filter(r => !r.isSystem && r.id !== "INSTRUCTOR");
 
     // Check if we have the minimum required roles to start
     const hasGenerator = activePlayers.some(p => p.role === "GENERATOR");

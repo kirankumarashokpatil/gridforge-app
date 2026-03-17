@@ -160,7 +160,7 @@ export default function WaitingRoom({
     );
 
     const roleOptions = Object.values(ROLES).filter(r => !r.isSystem && r.id !== "INSTRUCTOR");
-    const assignableRoleOptions = roleOptions.filter(r => r.id !== "NESO");
+    const assignableRoleOptions = roleOptions; // NESO is now marked as isSystem, so it's automatically excluded
     const myPlayer = pid ? players[pid] : null;
 
     // Debug: Log player state
@@ -517,7 +517,7 @@ export default function WaitingRoom({
                                                     }}
                                                 >
                                                     <option value={p.id === pid ? "NESO" : "UNASSIGNED"}>{p.id === pid ? "System Operator" : "Unassigned"}</option>
-                                                    {(p.id === pid ? roleOptions.filter(opt => opt.id === "NESO") : assignableRoleOptions).map(opt => (
+                                                    {(p.id === pid ? [ROLES.NESO] : assignableRoleOptions).map(opt => (
                                                         <option key={opt.id} value={opt.id}>{opt.name}</option>
                                                     ))}
                                                 </select>

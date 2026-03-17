@@ -111,14 +111,14 @@ export const ROLES = {
     NESO: {
         id: "NESO", name: "System Operator", emoji: "🎯",
         desc: "System Operator & Market Operator — clear DA/ID auctions, manage real-time balancing, dispatch BM. WIN: Keep frequency stable at lowest cost.",
-        canOwnAssets: false, canTrade: false, hasDemand: false, isOperator: true,
+        canOwnAssets: false, canTrade: false, hasDemand: false, isOperator: true, isSystem: true,
         hint: "Your sole job: dispatch BM efficiently. Minimize total SBP+SSP costs while maintaining 50 Hz. Winners dispatch the most value with fewest bids rejected.",
         guide: "As NESO, you clear all markets deterministically by price. Your score reflects market efficiency: how well you balanced supply/demand and what prices you accepted. Study the merit order to find cheap flexibility, and always consider frequency breach risk when calling bids.",
     },
     ELEXON: {
         id: "ELEXON", name: "Elexon", emoji: "📊",
         desc: "Settlement body — calculate imbalance charges, verify metering, reconcile P&L. WIN: Ensure fair settlement.",
-        canOwnAssets: false, canTrade: false, hasDemand: false, isSettlement: true,
+        canOwnAssets: false, canTrade: false, hasDemand: false, isSettlement: true, isSystem: true,
         hint: "You compute imbalance penalties and settlement reports. Your score reflects accuracy and fairness: all players' cash should sum correctly, with zero 'money creation' errors.",
         guide: "Elexon watches the blockchain of all trades and ensures each player pays/receives the correct amount. Your role is observational. Study the settlement formulas to understand how players earn/lose cash.",
     },

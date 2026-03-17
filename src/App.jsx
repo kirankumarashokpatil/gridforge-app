@@ -5,7 +5,7 @@ import { marketForSp, clearBM, feedbackMarketState, clearDA, computeForecasts } 
 import { availMW, availMWDirectional, updateSoF, initSoF } from "./engine/AssetPhysics.js";
 import { computeImbalanceSettlement } from "./engine/SettlementEngine.js";
 import { canSubmitBmBid } from "./engine/GateLogic.js";
-import { useGun, useToasts } from "./hooks/useGun.js";
+import { useApi, useToasts } from "./hooks/useApi.js";
 import { ACHIEVEMENTS, buildAchievementStats, checkAchievements } from "./engine/Achievements.js";
 import { computeRoleScore, computeSystemScore, computeOverallScore } from "./engine/ScoringEngine.js";
 import { createSystemState, updateSystemState, computePlayerSystemImpact, updatePlayerImpact, buildPlayerStats, buildNesoStats, buildElexonStats } from "./engine/PhysicalEngine.js";
@@ -68,7 +68,7 @@ function ConnectivityIndicator({ ready }) {
 
 /* ─── ROOT APP ─── */
 export default function App() {
-  const { gun, ready } = useGun();
+  const { api, ready, connect, subscribe } = useApi();
   const { toasts, add: addToast } = useToasts();
 
   const [screen, setScreen] = useState("lobby");
@@ -176,7 +176,7 @@ export default function App() {
   const isForgive = gmCfg.forgiveness;
 
   const handleJoin = useCallback(async (chosenAsset, customConfig = null) => {
-    if (!name.trim() || !room.trim() || !chosenAsset || !gun.current) return;
+    if (!name.trim() || !room.trim() || !chosenAsset || !api) return;
     const def = { ...ASSETS[chosenAsset], ...(customConfig || {}) };
     const id = uid(); const soc0 = initSoF(def);
     setPid(id); setAsset(chosenAsset); setAssetConfig(customConfig); setSoc(soc0);
@@ -193,21 +193,42 @@ export default function App() {
     });
 
     const assignedRole = isInstructor ? "instructor" : role;
-    gun.current.get(roomKey(room, "players")).get(id).put({ name: name.trim(), asset: chosenAsset, customConfig, cash: 0, daCash: 0, soc: soc0, lastSeen: Date.now(), role: assignedRole });
-    gun.current.get(roomKey(room, "meta")).put({ scenarioId });
+    
+    // Connect to WebSocket for real-time updates
+    connect(room);
+    
+    // Create player via API
+    await api.putPlayer(room, id, {
+      name: name.trim(),
+      asset: chosenAsset,
+      custom_config: customConfig,
+      cash: 0,
+      da_cash: 0,
+      sof: soc0,
+      role: assignedRole,
+      status: 'ACTIVE'
+    });
+    
+    // Create or update room
+    await api.createRoom(room, scenarioId);
+    
     setScreen("game");
-  }, [name, room, gun, isInstructor, scenarioId, role]);
+  }, [name, room, api, isInstructor, scenarioId, role, connect]);
 
   useEffect(() => {
-    if ((screen !== "game" && screen !== "waiting_room") || !gun.current || !room) return;
-    gun.current.get(roomKey(room, "players")).map().on((data, id) => { if (data && id && data.name) setPlayers(p => ({ ...p, [id]: { ...data, id } })); });
+    if ((screen !== "game" && screen !== "waiting_room") || !api || !room) return;
+    subscribe(`room:${room}:players`, (data) => {
+      if (data && typeof data === 'object') {
+        setPlayers(prev => ({ ...prev, ...data }));
+      }
+    });
 
-    const metaRef = gun.current.get(roomKey(room, "meta"));
-    metaRef.on(data => {
+    // Subscribe to room meta updates
+    subscribe(`room:${room}:meta`, (data) => {
       if (data?.scenarioId) setRoomScenario(data.scenarioId);
       if (data?.sp) setSp(data.sp);
       if (data?.phase) {
-        console.log('[GunDB] Phase update received:', data.phase, 'at', new Date().toISOString());
+        console.log('[API] Phase update received:', data.phase, 'at', new Date().toISOString());
         setPhase(data.phase);
       }
       if (data?.phaseStartTs) setPhaseStartTs(data.phaseStartTs);
@@ -227,39 +248,16 @@ export default function App() {
       }
     });
 
-    // CRITICAL FIX: For late joiners, also read current value to catch in-flight updates
-    // This ensures that if the host advanced phase before all subscriptions were ready,
-    // late joiners will still see the current phase and room state.
-    metaRef.once(data => {
-      if (data?.phase) {
-        console.log('[GunDB] Initial phase read (after subscription):', data.phase);
-        setPhase(data.phase);
-      }
-      if (data?.roomState === 'RUNNING') {
-        setScreen(prev => {
-          if (prev === 'waiting_room') {
-            const noAssetRoles = ['NESO', 'ELEXON', 'TRADER', 'SUPPLIER'];
-            return noAssetRoles.includes(refs.current.role) ? 'game_no_asset' : 'game';
-          }
-          return prev;
-        });
+    // Subscribe to forecast updates
+    subscribe(`room:${room}:forecast`, (data) => {
+      console.log('[App.jsx] Received forecast data from API:', data ? Object.keys(data) : 'null');
+      if (data) {
+        setPublishedForecast(data);
       }
     });
 
-    gun.current.get(roomKey(room, "forecast")).on((data) => {
-      console.log('[App.jsx] Received forecast data from GunDB:', data ? Object.keys(data) : 'null');
-      if (data && data.json) {
-        try {
-          const parsed = JSON.parse(data.json);
-          console.log('[App.jsx] Parsed forecast, has demand:', !!parsed.demand);
-          setPublishedForecast(parsed);
-        } catch (e) {
-          console.error('[App.jsx] Failed to parse forecast JSON:', e);
-        }
-      }
-    });
     // Listen for NESO manual NIV override
-    gun.current.get(roomKey(room, "neso_niv")).on((data) => {
+    subscribe(`room:${room}:neso_niv`, (data) => {
       if (data && data.mode === "manual" && data.niv !== undefined) {
         setNesoNivOverride(+data.niv);
       } else {
@@ -268,15 +266,14 @@ export default function App() {
     });
 
     // Listen for published settlement contracts (Elexon sync)
-    gun.current.get(roomKey(room, "sp_contracts")).on((data) => {
-      if (data && data.json) {
-        try {
-          const parsed = JSON.parse(data.json);
-          setSpContracts(prev => ({ ...prev, [parsed.sp]: parsed.contracts }));
-        } catch (e) { }
+    subscribe(`room:${room}:sp_contracts`, (data) => {
+      if (data && Array.isArray(data)) {
+        data.forEach(record => {
+          setSpContracts(prev => ({ ...prev, [record.sp]: record.contracts }));
+        });
       }
     });
-  }, [screen, room, gun]);
+  }, [screen, room, api, subscribe]);
 
   // ─── NON-ASSET ROLE JOIN (NESO, ELEXON, TRADER, SUPPLIER) ───
   useEffect(() => {
@@ -286,44 +283,68 @@ export default function App() {
     setAsset("NONE");
     setSoc(100);
     if (role === "TRADER") setCash(5000);
-    if (gun.current && room) {
+    if (api && room) {
       const assignedRole = isInstructor ? "instructor" : role;
-      gun.current.get(roomKey(room, "players")).get(id).put({
-        name: name.trim(), asset: "NONE",
-        cash: role === "TRADER" ? 5000 : 0, daCash: 0, soc: 100,
-        lastSeen: Date.now(), role: assignedRole,
+      api.putPlayer(room, id, {
+        name: name.trim(),
+        asset: "NONE",
+        cash: role === "TRADER" ? 5000 : 0,
+        da_cash: 0,
+        sof: 100,
+        role: assignedRole,
+        status: 'ACTIVE'
       });
-      gun.current.get(roomKey(room, "meta")).put({ scenarioId });
+      api.updateRoom(room, { scenarioId });
     }
     setScreen("game");
-  }, [screen, gun, room]);
+  }, [screen, api, room]);
 
   useEffect(() => {
-    if (screen !== "game" || !gun.current || !room || !sp) return;
+    if (screen !== "game" || !api || !room || !sp) return;
     setOrderBook({}); setDaOrderBook({}); setIdOrderBook({});
     const daCycle = Math.floor(sp / DA_CYCLE);
-    gun.current.get(roomKey(room, `bm_${sp}`)).map().on((data, id) => { if (data && id) setOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
-    gun.current.get(roomKey(room, `da_${daCycle}`)).map().on((data, id) => { if (data && id) setDaOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
-    gun.current.get(roomKey(room, `id_${sp}`)).map().on((data, id) => { if (data && id) setIdOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
-    // Listen for EPEX DA curve submissions
-    gun.current.get(roomKey(room, "da_curves")).map().on((data, id) => {
-      if (data && id && data.json) {
-        try {
-          const parsed = JSON.parse(data.json);
-          setDaCurves(prev => ({ ...prev, [id]: { ...data, segments: parsed, playerId: id } }));
-        } catch (e) { console.error('[DA Curves] Failed to parse curve:', e); }
+    
+    // Subscribe to BM order book
+    subscribe(`room:${room}:bm:${sp}`, (data) => {
+      if (data && typeof data === 'object') {
+        setOrderBook(prev => ({ ...prev, ...data }));
       }
     });
-  }, [sp, screen, room, gun]);
+    
+    // Subscribe to DA order book
+    subscribe(`room:${room}:da:${daCycle}`, (data) => {
+      if (data && typeof data === 'object') {
+        setDaOrderBook(prev => ({ ...prev, ...data }));
+      }
+    });
+    
+    // Subscribe to ID order book
+    subscribe(`room:${room}:id:${sp}`, (data) => {
+      if (data && typeof data === 'object') {
+        setIdOrderBook(prev => ({ ...prev, ...data }));
+      }
+    });
+    
+    // Subscribe to DA curve submissions
+    subscribe(`room:${room}:da_curves`, (data) => {
+      if (data && typeof data === 'object') {
+        Object.entries(data).forEach(([id, curve]) => {
+          if (curve && curve.segments) {
+            setDaCurves(prev => ({ ...prev, [id]: { segments: curve.segments, playerId: id } }));
+          }
+        });
+      }
+    });
+  }, [sp, screen, room, api, subscribe]);
 
   const instructorNextPhase = useCallback(() => {
-    if (!gun.current || !room) return;
+    if (!api || !room) return;
     const { sp: currentSp, phase: currentPhase } = refs.current;
     const nextPhase = currentPhase === "DA" ? "ID" : currentPhase === "ID" ? "BM" : currentPhase === "BM" ? "SETTLED" : "DA";
     const nextSp = currentPhase === "SETTLED" ? currentSp + 1 : currentSp;
-    gun.current.get(roomKey(room, "meta")).put({ phase: nextPhase, sp: nextSp, phaseStartTs: Date.now() });
+    api.updateRoom(room, { phase: nextPhase, sp: nextSp, phaseStartTs: Date.now() });
     addToast({ emoji: "✅", title: "Phase Advanced", body: `Moved to ${nextPhase}`, col: "#b78bfa" });
-  }, [gun, room, addToast]);
+  }, [api, room, addToast]);
 
   // 1. RE-COMPUTE MARKET WHEN SP/PHASE/FORECAST CHANGES
   useEffect(() => {
@@ -877,14 +898,14 @@ export default function App() {
           setOverallScoreHistory(prev => [...prev, overall]);
         }, 100);
 
-        if (gun.current && rm) {
+        if (api && rm) {
           const assignedRole = refs.current.isInstructor ? "instructor" : refs.current.role;
-          // Compute scores for Gun.js publish
+          // Compute scores for API publish
           const quickStats = buildPlayerStats(assignedRole, { spHistory: refs.current.spHistory || [], assetKey: ak, soc: refs.current.soc, cash: newC, daCash: refs.current.daCash, imbalancePenalty: refs.current.imbalancePenalty, systemImpacts: refs.current.systemState?.playerImpacts || {}, pid: id, congestionRevenue: congestionRev });
           const quickRole = computeRoleScore(assignedRole, quickStats);
           const quickSys = computeSystemScore(refs.current.systemState?.playerImpacts?.[id] || {});
           const quickOverall = computeOverallScore(quickRole.roleScore, quickSys);
-          gun.current.get(roomKey(rm, "players")).get(id).put({ name: n, asset: ak, cash: newC, soc: refs.current.soc, lastSeen: Date.now(), role: assignedRole, roleScore: quickRole.roleScore, systemScore: quickSys, overallScore: quickOverall });
+          api.putPlayer(rm, id, { name: n, asset: ak, cash: newC, sof: refs.current.soc, role: assignedRole, roleScore: quickRole.roleScore, systemScore: quickSys, overallScore: quickOverall });
 
           // Publish the master settlement record if I am the operator (e.g. Instructor or NESO)
           // Since all clients compute it identically (deterministic), any one can publish it, 
@@ -893,7 +914,7 @@ export default function App() {
             const settleSp = old.sp;
             const contractsForSp = refs.current.spContracts[settleSp];
             if (contractsForSp) {
-              gun.current.get(roomKey(rm, "sp_contracts")).put({ json: JSON.stringify({ sp: settleSp, contracts: contractsForSp }) });
+              api.updateRoom(rm, { spContracts: { [settleSp]: contractsForSp } });
             }
           }
         }
@@ -947,30 +968,30 @@ export default function App() {
   // calculates deviation and applies imbPen to the total SP revenue.
 
 
-  // Instructor speed/pause sync via Gun.js
+  // Instructor speed/pause sync via API
   const instructorSetSpeed = useCallback((speedId) => {
     const sp = TICK_SPEEDS[speedId];
     if (!sp) return;
     setTickSpeed(sp.ms);
-    if (gun.current && room) gun.current.get(roomKey(room, "meta")).put({ tickSpeed: sp.ms });
+    if (api && room) api.updateRoom(room, { tickSpeed: sp.ms });
     addToast({ emoji: sp.emoji, title: "Tick speed changed", body: sp.label, col: "#b78bfa" });
-  }, [gun, room, addToast]);
+  }, [api, room, addToast]);
 
   const instructorTogglePause = useCallback(() => {
     setPaused(p => {
       const next = !p;
-      if (gun.current && room) gun.current.get(roomKey(room, "meta")).put({ paused: next });
+      if (api && room) api.updateRoom(room, { paused: next });
       addToast({ emoji: next ? "⏸️" : "▶️", title: next ? "GAME PAUSED" : "GAME RESUMED", body: next ? "Instructor has frozen the game for discussion" : "Game is live again", col: next ? "#f5b222" : "#1de98b" });
       return next;
     });
-  }, [gun, room, addToast]);
+  }, [api, room, addToast]);
 
   useEffect(() => { refs.current.orderBookSnap = orderBook; }, [orderBook]);
   useEffect(() => { refs.current.daOrderBookSnap = daOrderBook; }, [daOrderBook]);
 
   const submitBid = useCallback(() => {
     const { submitted: sub, pid: id, name: n, soc: s, sp: t, room: rm, asset: ak, assetConfig, role, phase: currentPhase, msLeft: remainingMs } = refs.current;
-    if (!gun.current || !id) return;
+    if (!api || !id) return;
     // Gate closure: BM bids only allowed during BM phase and before timer expiry
     if (!canSubmitBmBid(currentPhase, remainingMs)) {
       addToast({ emoji: "🚫", title: "BM Gate Closed", body: `Gate closed — bids for SP ${t} are no longer accepted.`, col: "#f0455a" });
@@ -999,36 +1020,36 @@ export default function App() {
     if (!isTraderRole && +myBid.mw > avail + 0.5) { alert(`⚠ Max available: ${f0(avail)} MW`); return; }
 
     const bid = { id, name: n, asset: ak, mw: +myBid.mw, price: +myBid.price, side: bidSide, col: def.col, isBot: false };
-    gun.current.get(roomKey(rm, `bm_${t}`)).get(id).put(bid);
+    api.putBmBid(rm, t, id, bid);
     setSubmitted(true); setOrderBook(p => ({ ...p, [id]: bid }));
     addToast({ emoji: "📤", title: "BM bid submitted", body: `${f0(myBid.mw)}MW @ £${myBid.price}/MWh`, col: "#38c0fc" });
-  }, [myBid, gun, addToast, publishedForecast]);
+  }, [myBid, api, addToast, publishedForecast]);
 
   const submitDaBid = useCallback(() => {
     const { pid: id, name: n, room: rm, asset: ak, sp: t, role } = refs.current;
-    if (!id || !gun.current || daSubmitted) return;
+    if (!id || !api || daSubmitted) return;
     if (!daMyBid.price || isNaN(+daMyBid.price) || +daMyBid.mw <= 0) return;
     const m = marketForSp(t, refs.current.scenarioId, [], publishedForecast); const def = ASSETS[ak] || { col: "#ffffff" };
     const daCycle = Math.floor(t / DA_CYCLE);
     const isTraderRole = ROLES[role]?.canOwnAssets === false;
     const bidSide = isTraderRole && daMyBid.side ? daMyBid.side : (m.forecast.isShort ? "offer" : "bid");
     const bid = { id, name: n, asset: ak, mw: +daMyBid.mw, price: +daMyBid.price, side: bidSide, col: def.col, isBot: false };
-    gun.current.get(roomKey(rm, `da_${daCycle}`)).get(id).put(bid);
+    api.putDaBid(rm, daCycle, id, bid);
     setDaSubmitted(true); refs.current.daSubmitted = true; setDaOrderBook(p => ({ ...p, [id]: bid }));
     addToast({ emoji: "📋", title: "DA bid submitted", body: `${f0(daMyBid.mw)}MW @ £${daMyBid.price}/MWh`, col: "#f5b222" });
-  }, [daMyBid, gun, daSubmitted, addToast]);
+  }, [daMyBid, api, daSubmitted, addToast]);
 
   // ─── EPEX DA CURVE SUBMISSION (piecewise linear segments for all 48 SPs) ───
   const submitDaCurve = useCallback((segments) => {
     const { pid: id, name: n, room: rm, asset: ak, role } = refs.current;
-    if (!id || !gun.current || !segments || segments.length === 0) return;
+    if (!id || !api || !segments || segments.length === 0) return;
     const def = ASSETS[ak] || {};
     // Determine side from asset type: generators/BESS sell, suppliers buy, traders both
     const r = ROLES[role] || {};
     const side = r.hasDemand ? "buy" : (r.canOwnAssets ? "sell" : "both");
-    // Serialize segments to JSON for Gun.js (Gun can't handle nested arrays)
-    gun.current.get(roomKey(rm, "da_curves")).get(id).put({
-      json: JSON.stringify(segments),
+    // Submit curve segments via API
+    api.putDaCurve(rm, id, {
+      segments,
       side,
       name: n,
       asset: ak,
@@ -1040,30 +1061,30 @@ export default function App() {
     const totalSPs = segments.reduce((s, seg) => s + (seg.spEnd - seg.spStart + 1), 0);
     const maxVol = Math.max(...segments.map(s => s.pmax));
     addToast({ emoji: "📋", title: "DA Curve Submitted", body: `${segments.length} segments, ${totalSPs} SPs, up to ${f0(maxVol)}MW`, col: "#f5b222" });
-  }, [gun, addToast]);
+  }, [api, addToast]);
 
   const submitIdOrder = useCallback(() => {
     const { pid: id, name: n, room: rm, asset: ak, sp: t } = refs.current;
-    if (!id || !gun.current || phase !== "ID" || idSubmitted) return;
+    if (!id || !api || phase !== "ID" || idSubmitted) return;
     if (!idMyOrder.price || isNaN(+idMyOrder.price) || +idMyOrder.mw <= 0) return;
     const def = ASSETS[ak] || { col: "#ffffff" };
     const bid = { id, name: n, asset: ak, mw: +idMyOrder.mw, price: +idMyOrder.price, side: idMyOrder.side, col: def.col, isBot: false };
-    gun.current.get(roomKey(rm, `id_${t}`)).get(id).put(bid);
+    api.putIdBid(rm, t, id, bid);
     setIdSubmitted(true); setIdOrderBook(p => ({ ...p, [id]: bid }));
     addToast({ emoji: "🤝", title: "ID Order Placed", body: `${idMyOrder.side === "buy" ? "BUY" : "SELL"} ${f0(idMyOrder.mw)}MW @ £${idMyOrder.price}/MWh`, col: "#38c0fc" });
-  }, [idMyOrder, phase, gun, idSubmitted, addToast]);
+  }, [idMyOrder, phase, api, idSubmitted, addToast]);
 
   const instructorTrigger = useCallback((eventId) => {
-    if (!gun.current || !room) return;
-    gun.current.get(roomKey(room, "instructor")).put({ eventId, ts: Date.now() });
+    if (!api || !room) return;
+    api.triggerEvent(room, eventId);
     addToast({ emoji: "🎓", title: "Event triggered", body: EVENTS.find(e => e.id === eventId)?.name || eventId, col: "#b78bfa" });
-  }, [gun, room, addToast]);
+  }, [api, room, addToast]);
 
   const instructorSetScenario = useCallback((scId) => {
-    if (!gun.current || !room) return;
-    gun.current.get(roomKey(room, "meta")).put({ scenarioId: scId });
+    if (!api || !room) return;
+    api.updateRoom(room, { scenarioId: scId });
     addToast({ emoji: "🌍", title: "Scenario changed", body: SCENARIOS[scId]?.name || scId, col: "#f5b222" });
-  }, [gun, room, addToast]);
+  }, [api, room, addToast]);
 
   // ─── MULTI-DIMENSIONAL LEADERBOARD ───
   const leaderboardData = useMemo(() => {
@@ -1088,7 +1109,7 @@ export default function App() {
     if (!pid) setPid(uid());
     setScreen("waiting_room");
   }} />;
-  if (screen === "waiting_room") return <WaitingRoom gun={gun.current} gunReady={ready} room={room} name={name} pid={pid} setPid={setPid} role={role} setRole={setRole} setScreen={setScreen} isHost={isInstructor} setIsHost={setIsInstructor} gameMode={gameMode} setGameMode={setGameMode} scenarioId={scenarioId} setScenarioId={setScenarioId} players={players} />;
+  if (screen === "waiting_room") return <WaitingRoom gunReady={ready} room={room} name={name} pid={pid} setPid={setPid} role={role} setRole={setRole} setScreen={setScreen} isHost={isInstructor} setIsHost={setIsInstructor} gameMode={gameMode} setGameMode={setGameMode} scenarioId={scenarioId} setScenarioId={setScenarioId} players={players} />;
   if (screen === "asset") return <AssetScreen onSelect={handleJoin} playerName={name} room={room} scenario={sc} role={role} />;
   if (screen === "game_no_asset") return (
     <div style={{ background: "#050e16", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", color: "#38c0fc" }}>
@@ -1145,12 +1166,11 @@ export default function App() {
       isInstructor, paused, freqBreachSec, contractPosition, imbalancePenalty, earnedAchievements, gameMode, role,
       onTickSpeedChange: instructorSetSpeed, onPauseToggle: instructorTogglePause, onNextPhase: instructorNextPhase,
       onExecuteEvent: instructorTrigger, onScenarioChange: instructorSetScenario, soc, players,
-      gun: gun.current, // Pass gun so NESO can publish forecast
       physicalState, setPhysicalState,
       nesoNivOverride,
       onSetManualNiv: (mode, niv) => {
-        if (gun.current && room) {
-          gun.current.get(roomKey(room, "neso_niv")).put({ mode, niv: mode === "manual" ? niv : null });
+        if (api && room) {
+          api.updateRoom(room, { nesoNivMode: mode, nesoNiv: mode === "manual" ? niv : null });
         }
         setNesoNivOverride(mode === "manual" ? niv : null);
       },

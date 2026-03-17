@@ -34,9 +34,14 @@ const HEADLESS = process.env.HEADLESS !== 'false';
 // ─── Role configuration (core flow only) ────────────────────────────────────
 // To keep the test robust and fast we exercise the three core
 // human roles required to run a standard "Normal Day" session:
-//   - NESO (host / system operator)
+//   - NESO (host / system operator) — auto-assigned to first joiner
 //   - Generator (owns an OCGT asset)
 //   - Supplier (no asset, hedging demand)
+//   - Elexon (settlement operator) — assigned by NESO host
+//   - Trader & BESS (additional roles to test full coverage)
+// Note: NESO and Elexon are isSystem: true in constants.js, so they don't
+// appear in WaitingRoom role selection buttons. NESO is auto-assigned to host.
+// Elexon (and other non-selectable roles) are assigned by the NESO host via dropdowns.
 const ROLES = [
     { name: 'NESO_Op',      roleLabel: 'System Operator',   roleId: 'NESO',      isHost: true,  needsAsset: false, assetKey: null    },
     { name: 'GenCo',        roleLabel: 'Generator',         roleId: 'GENERATOR', isHost: false, needsAsset: true,  assetKey: 'OCGT'  },

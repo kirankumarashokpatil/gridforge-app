@@ -16,7 +16,8 @@
  *   4. Game UI: verify SP indicator "/48" is present.
  *
  * Roles tested:
- *   - Non-asset roles: NESO (System Operator), Elexon, Trader, Supplier
+ *   - Non-asset roles: Trader, Supplier
+ *     (NESO and Elexon are isSystem: true so they're auto-assigned to host/unavailable)
  *   - Asset roles: Generator (Gas Peaker), BESS (Grid BESS),
  *                  DSR (Demand Response), Interconnector (IFA France)
  *
@@ -44,8 +45,8 @@ const HEADLESS = process.env.HEADLESS !== 'false';
 // "SELECT OR CONFIGURE {ASSET_NAME} →" on AssetScreen.
 const TEST_CASES = [
   // Non-asset roles (skip AssetScreen entirely)
-  { name: 'Smoke_NESO', roleLabel: 'System Operator', needsAsset: false },
-  { name: 'Smoke_Elexon', roleLabel: 'Elexon', needsAsset: false },
+  // NOTE: NESO and Elexon are isSystem: true in constants.js, so they're hidden
+  // from WaitingRoom role selection and cannot be tested via UI button clicks.
   { name: 'Smoke_Trader', roleLabel: 'Trader', needsAsset: false },
   { name: 'Smoke_Supplier', roleLabel: 'Supplier', needsAsset: false },
 
