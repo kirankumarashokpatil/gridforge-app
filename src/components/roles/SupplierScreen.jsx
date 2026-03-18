@@ -47,7 +47,7 @@ export default function SupplierScreen(props) {
     const [supplierKey, setSupplierKey] = useState(assetKey && SUPPLIERS[assetKey] ? assetKey : "BRITISH_GAS");
     const sup = SUPPLIERS[supplierKey] || SUPPLIERS.BRITISH_GAS;
 
-    const currentMkt = phase === "DA" ? market?.forecast : market?.actual;
+    const currentMkt = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase) ? market?.forecast : market?.actual;
     const sbp = currentMkt?.sbp || 50;
     const ssp = currentMkt?.ssp || 50;
     const hr = currentMkt?.hr ?? Math.floor((sp - 1) / 2);
@@ -171,10 +171,10 @@ export default function SupplierScreen(props) {
                     <div style={{ background: "#1a3045" }} />
                     <div>
                         <div style={{ fontSize: 8, color: "#4d7a96", marginBottom: 2 }}>ACTUAL DEMAND (REVEALED)</div>
-                        <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 14, color: phase === "SETTLED" || phase === "BM" ? (actualDemandMw > baseDemandMw ? "#f0455a" : "#1de98b") : "#4d7a96", fontWeight: 800 }}>
-                            {phase === "SETTLED" || phase === "BM" ? `${f0(actualDemandMw)} MW` : "? ? ?"}
+                        <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 14, color: ["SETTLED","RESULTS","BM","BM_OPEN","BM_CLOSE","REALTIME"].includes(phase) ? (actualDemandMw > baseDemandMw ? "#f0455a" : "#1de98b") : "#4d7a96", fontWeight: 800 }}>
+                            {["SETTLED","RESULTS","BM","BM_OPEN","BM_CLOSE","REALTIME"].includes(phase) ? `${f0(actualDemandMw)} MW` : "? ? ?"}
                         </div>
-                        <div style={{ fontSize: 8, color: "#2a5570" }}>{phase === "DA" || phase === "ID" ? "Revealed at BM phase" : `Error: ${actualDemandMw > baseDemandMw ? "+" : ""}${f0(actualDemandMw - baseDemandMw)}MW`}</div>
+                        <div style={{ fontSize: 8, color: "#2a5570" }}>{["FORECAST","DA","IDA1","IDA2","ID"].includes(phase) ? "Revealed at BM phase" : `Error: ${actualDemandMw > baseDemandMw ? "+" : ""}${f0(actualDemandMw - baseDemandMw)}MW`}</div>
                     </div>
                 </div>
             </div>
@@ -266,7 +266,7 @@ export default function SupplierScreen(props) {
     );
 
     // --- SECTION 3: PROCUREMENT ---
-    const isDa = phase === "DA";
+    const isDa = ["DA", "IDA1", "IDA2"].includes(phase);
     const isId = phase === "ID";
 
     const sect3Procurement = (

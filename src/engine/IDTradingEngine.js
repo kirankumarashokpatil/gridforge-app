@@ -269,38 +269,37 @@ export function formatPosition(position) {
 // ─── PHASE MANAGEMENT ───
 
 export const PHASES = {
-  DA: 'DA',           // Day-ahead curve submission
-  ID: 'ID',           // Intraday trading (with gate closures)
-  BM_GATE: 'BM_GATE', // BM gate closed, pre-delivery
-  DELIVERY: 'DELIVERY', // Real-time delivery
-  SETTLEMENT: 'SETTLEMENT' // Settlement and results
+  FORECAST: 'FORECAST',   // Day-ahead forecast generation
+  DA: 'DA',               // Day-ahead curve submission
+  IDA1: 'IDA1',           // Intraday auction round 1
+  IDA2: 'IDA2',           // Intraday auction round 2
+  ID: 'ID',               // Continuous intraday trading (order-book pay-as-bid)
+  REALTIME: 'REALTIME',   // Real-time BM phase (SP-by-SP)
+  BM_OPEN: 'BM_OPEN',     // BM accepting bids for current SP
+  BM_CLOSE: 'BM_CLOSE',   // BM cleared + settled for current SP
+  RESULTS: 'RESULTS',     // End-of-day results & scoring
 };
 
 export const PHASE_DISPLAY_NAMES = {
+  [PHASES.FORECAST]: 'Forecast',
   [PHASES.DA]: 'Day-Ahead Auction',
-  [PHASES.ID]: 'Intraday Trading',
-  [PHASES.BM_GATE]: 'BM Gate Closed',
-  [PHASES.DELIVERY]: 'Live Delivery',
-  [PHASES.SETTLEMENT]: 'Settlement'
+  [PHASES.IDA1]: 'Intraday Auction 1',
+  [PHASES.IDA2]: 'Intraday Auction 2',
+  [PHASES.ID]: 'Continuous Intraday',
+  [PHASES.REALTIME]: 'Real-Time Delivery',
+  [PHASES.BM_OPEN]: 'BM Open',
+  [PHASES.BM_CLOSE]: 'BM Closed',
+  [PHASES.RESULTS]: 'Settlement & Results',
 };
 
 export function getPhaseFromTime(currentTimeHour) {
-  // DA: First 2 hours of Day D (simulated)
-  if (currentTimeHour < 2) {
-    return PHASES.DA;
-  }
-  
-  // ID: From 2 hours until first gate closure
-  if (currentTimeHour < 23) {
-    return PHASES.ID;
-  }
-  
-  // After 23:00, we enter continuous cycle of BM_GATE -> DELIVERY -> SETTLEMENT
-  // Each SP follows: gate closes -> BM trading -> delivery -> settlement -> next SP
-  const spPhase = (currentTimeHour * 2) % 4; // Rough approximation
-  
-  // Simplified: cycle through phases for demo
-  return PHASES.ID;
+  if (currentTimeHour < 0.5) return PHASES.FORECAST;
+  if (currentTimeHour < 1.5) return PHASES.DA;
+  if (currentTimeHour < 2.5) return PHASES.IDA1;
+  if (currentTimeHour < 3.5) return PHASES.IDA2;
+  if (currentTimeHour < 23) return PHASES.ID;
+  if (currentTimeHour < 24) return PHASES.REALTIME;
+  return PHASES.RESULTS;
 }
 
 // ─── DA AUCTION TIMING ───

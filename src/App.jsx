@@ -79,10 +79,12 @@ export default function App() {
   const [assetConfig, setAssetConfig] = useState(null);
   const [isInstructor, setIsInstructor] = useState(false);
   const [scenarioId, setScenarioId] = useState("NORMAL");
-  const [sp, setSp] = useState(1);
-  const [phase, setPhase] = useState("DA"); // "DA", "ID", "BM", "SETTLED"
+  const [sp, setSp] = useState(0);            // currentSp from backend (0 = pre-REALTIME)
+  const [phase, setPhase] = useState("FORECAST"); // dayPhase from backend
+  const [bmSubPhase, setBmSubPhase] = useState(null); // BM_OPEN / BM_CLOSE during REALTIME
+  const [day, setDay] = useState(1);           // Current trading day
   const [phaseStartTs, setPhaseStartTs] = useState(0);
-  const [market, setMarket] = useState(null); // Will hold { forecast, actual }
+  const [market, setMarket] = useState(null); // Current SP market { forecast, actual }
   const [msLeft, setMsLeft] = useState(TICK_MS);
   const [soc, setSoc] = useState(50);
   const [cash, setCash] = useState(0);
@@ -106,7 +108,6 @@ export default function App() {
   const [publishedForecast, setPublishedForecast] = useState(null); // Shared NESO forecast version
   const [roomScenario, setRoomScenario] = useState("NORMAL");
   const [spContracts, setSpContracts] = useState({}); // Master ledger for Elexon settlement
-  const [nesoNivOverride, setNesoNivOverride] = useState(null); // null = auto, number = manual
 
   // ─── SCORING ENGINE STATE ───
   const [systemState, setSystemState] = useState(() => createSystemState());
@@ -169,9 +170,10 @@ export default function App() {
     pendingReboundMwh: 0,
   });
 
-  const refs = useRef({}); refs.current = { sp, phase, phaseStartTs, soc, cash, daCash, submitted, pid, name, room, asset, assetConfig, isInstructor, scenarioId: roomScenario, gameMode, role, contractPosition, positions, contracts, daPositions, orderBookSnap: orderBook, daOrderBookSnap: daOrderBook, idOrderBookSnap: idOrderBook, spContracts, players, physicalState, msLeft, tickSpeed, daCurves };
+  const refs = useRef({}); refs.current = { sp, phase, bmSubPhase, day, phaseStartTs, soc, cash, daCash, submitted, pid, name, room, asset, assetConfig, isInstructor, scenarioId: roomScenario, gameMode, role, contractPosition, positions, contracts, daPositions, orderBookSnap: orderBook, daOrderBookSnap: daOrderBook, idOrderBookSnap: idOrderBook, spContracts, players, physicalState, msLeft, tickSpeed, daCurves };
   const prevPhaseRef = useRef({ phase: "INIT", sp: 0 });
   const lastEventRef = useRef(null);
+  const advanceInFlightRef = useRef(false);
   const gmCfg = GAME_MODES[gameMode] || GAME_MODES.FULL;
   const isForgive = gmCfg.forgiveness;
 
@@ -217,20 +219,26 @@ export default function App() {
 
   useEffect(() => {
     if ((screen !== "game" && screen !== "waiting_room") || !api || !room) return;
-    subscribe(`room:${room}:players`, (data) => {
+    const unsubPlayers = subscribe(`room:${room}:players`, (data) => {
       if (data && typeof data === 'object') {
         setPlayers(prev => ({ ...prev, ...data }));
       }
     });
 
     // Subscribe to room meta updates
-    subscribe(`room:${room}:meta`, (data) => {
+    const unsubMeta = subscribe(`room:${room}:meta`, (data) => {
       if (data?.scenarioId) setRoomScenario(data.scenarioId);
-      if (data?.sp) setSp(data.sp);
-      if (data?.phase) {
-        console.log('[API] Phase update received:', data.phase, 'at', new Date().toISOString());
-        setPhase(data.phase);
+      // New backend fields: dayPhase, currentSp, bmSubPhase, day
+      if (data?.currentSp !== undefined) setSp(data.currentSp);
+      else if (data?.sp !== undefined) setSp(data.sp); // legacy compat
+      if (data?.dayPhase) {
+        console.log('[API] Phase update received:', data.dayPhase, 'at', new Date().toISOString());
+        setPhase(data.dayPhase);
+      } else if (data?.phase) {
+        setPhase(data.phase); // legacy compat
       }
+      if (data?.bmSubPhase !== undefined) setBmSubPhase(data.bmSubPhase);
+      if (data?.day !== undefined) setDay(data.day);
       if (data?.phaseStartTs) setPhaseStartTs(data.phaseStartTs);
       if (data?.tickSpeed) setTickSpeed(data.tickSpeed);
       if (data?.paused !== undefined) setPaused(data.paused);
@@ -249,30 +257,28 @@ export default function App() {
     });
 
     // Subscribe to forecast updates
-    subscribe(`room:${room}:forecast`, (data) => {
+    const unsubForecast = subscribe(`room:${room}:forecast`, (data) => {
       console.log('[App.jsx] Received forecast data from API:', data ? Object.keys(data) : 'null');
       if (data) {
         setPublishedForecast(data);
       }
     });
 
-    // Listen for NESO manual NIV override
-    subscribe(`room:${room}:neso_niv`, (data) => {
-      if (data && data.mode === "manual" && data.niv !== undefined) {
-        setNesoNivOverride(+data.niv);
-      } else {
-        setNesoNivOverride(null);
-      }
-    });
-
     // Listen for published settlement contracts (Elexon sync)
-    subscribe(`room:${room}:sp_contracts`, (data) => {
+    const unsubSpContracts = subscribe(`room:${room}:sp_contracts`, (data) => {
       if (data && Array.isArray(data)) {
         data.forEach(record => {
           setSpContracts(prev => ({ ...prev, [record.sp]: record.contracts }));
         });
       }
     });
+
+    return () => {
+      unsubPlayers?.();
+      unsubMeta?.();
+      unsubForecast?.();
+      unsubSpContracts?.();
+    };
   }, [screen, room, api, subscribe]);
 
   // ─── NON-ASSET ROLE JOIN (NESO, ELEXON, TRADER, SUPPLIER) ───
@@ -300,33 +306,34 @@ export default function App() {
   }, [screen, api, room]);
 
   useEffect(() => {
-    if (screen !== "game" || !api || !room || !sp) return;
+    if (screen !== "game" || !api || !room) return;
     setOrderBook({}); setDaOrderBook({}); setIdOrderBook({});
-    const daCycle = Math.floor(sp / DA_CYCLE);
+    const spForBooks = sp > 0 ? sp : 1;
+    const daCycle = Math.floor(spForBooks / DA_CYCLE);
     
     // Subscribe to BM order book
-    subscribe(`room:${room}:bm:${sp}`, (data) => {
+    const unsubBm = subscribe(`room:${room}:bm:${spForBooks}`, (data) => {
       if (data && typeof data === 'object') {
         setOrderBook(prev => ({ ...prev, ...data }));
       }
     });
     
     // Subscribe to DA order book
-    subscribe(`room:${room}:da:${daCycle}`, (data) => {
+    const unsubDa = subscribe(`room:${room}:da:${daCycle}`, (data) => {
       if (data && typeof data === 'object') {
         setDaOrderBook(prev => ({ ...prev, ...data }));
       }
     });
     
     // Subscribe to ID order book
-    subscribe(`room:${room}:id:${sp}`, (data) => {
+    const unsubId = subscribe(`room:${room}:id:${spForBooks}`, (data) => {
       if (data && typeof data === 'object') {
         setIdOrderBook(prev => ({ ...prev, ...data }));
       }
     });
     
     // Subscribe to DA curve submissions
-    subscribe(`room:${room}:da_curves`, (data) => {
+    const unsubDaCurves = subscribe(`room:${room}:da_curves`, (data) => {
       if (data && typeof data === 'object') {
         Object.entries(data).forEach(([id, curve]) => {
           if (curve && curve.segments) {
@@ -335,32 +342,57 @@ export default function App() {
         });
       }
     });
+
+    return () => {
+      unsubBm?.();
+      unsubDa?.();
+      unsubId?.();
+      unsubDaCurves?.();
+    };
   }, [sp, screen, room, api, subscribe]);
 
-  const instructorNextPhase = useCallback(() => {
+  const instructorNextPhase = useCallback(async () => {
     if (!api || !room) return;
-    const { sp: currentSp, phase: currentPhase } = refs.current;
-    const nextPhase = currentPhase === "DA" ? "ID" : currentPhase === "ID" ? "BM" : currentPhase === "BM" ? "SETTLED" : "DA";
-    const nextSp = currentPhase === "SETTLED" ? currentSp + 1 : currentSp;
-    api.updateRoom(room, { phase: nextPhase, sp: nextSp, phaseStartTs: Date.now() });
-    addToast({ emoji: "✅", title: "Phase Advanced", body: `Moved to ${nextPhase}`, col: "#b78bfa" });
+    if (advanceInFlightRef.current) return;
+    advanceInFlightRef.current = true;
+
+    const { phase: currentPhase } = refs.current;
+
+    try {
+      // During REALTIME, use BM advance (per-SP)
+      if (currentPhase === "REALTIME") {
+        const result = await api.engineAdvanceBm(room);
+        if (result) {
+          addToast({ emoji: "⚡", title: "BM Advanced", body: `SP ${result.currentSp || ''} — ${result.bmSubPhase || ''}`, col: "#1de98b" });
+        }
+        return;
+      }
+
+      // Day-level phases: FORECAST → DA → IDA1 → IDA2 → ID → REALTIME → RESULTS
+      const result = await api.engineAdvanceDayPhase(room);
+      if (result) {
+        addToast({ emoji: "✅", title: "Phase Advanced", body: `Moved to ${result.dayPhase || 'next phase'}`, col: "#b78bfa" });
+      }
+    } finally {
+      advanceInFlightRef.current = false;
+    }
   }, [api, room, addToast]);
 
   // 1. RE-COMPUTE MARKET WHEN SP/PHASE/FORECAST CHANGES
   useEffect(() => {
     if (screen !== "game") return;
     console.log('[App] Phase changed to:', phase, 'SP:', sp);
-    const mState = marketForSp(sp, scenarioId, [], publishedForecast, nesoNivOverride);
+    const mState = marketForSp(sp, scenarioId, [], publishedForecast);
     setMarket(mState);
     setForecasts(computeForecasts(sp, scenarioId, publishedForecast));
 
     if (mState.actual?.event && mState.actual.event.id !== lastEventRef.current) {
       lastEventRef.current = mState.actual.event.id;
-      if (phase === "ID" || phase === "BM") {
+      if (["ID", "BM", "BM_OPEN", "BM_CLOSE", "REALTIME"].includes(phase)) {
         addToast({ emoji: mState.actual.event.emoji, title: mState.actual.event.name, body: mState.actual.event.desc, col: mState.actual.event.col });
       }
     }
-  }, [sp, phase, scenarioId, screen, addToast, nesoNivOverride, publishedForecast]);
+  }, [sp, phase, scenarioId, screen, addToast, publishedForecast]);
 
   // 2. GLOBAL TIMER (Visual only, Instructor Auto-Advances)
   useEffect(() => {
@@ -378,7 +410,8 @@ export default function App() {
       }
 
       // GRID FAILURE CHECK
-      const m = refs.current.phase === "DA" ? market?.forecast : market?.actual;
+      const curPhase = refs.current.phase;
+      const m = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(curPhase) ? market?.forecast : market?.actual;
       if (m) {
         const freqLimit = gameMode === "TUTORIAL" ? FORGIVENESS.freqFailDuration : FREQ_FAIL_DURATION;
         if (m.freq < FREQ_FAIL_LO || m.freq > FREQ_FAIL_HI) {
@@ -555,7 +588,7 @@ export default function App() {
     }
 
     // --- BM CLOSED (Actual Delivery) ---
-    else if (old.phase === "BM") {
+    else if (old.phase === "BM" || old.phase === "BM_OPEN") {
       const bmArr = [...Object.values(orderBookSnap || {}).filter(b => b && b.mw), ...market.actual.bots];
       const res = clearBM(bmArr, market.actual);
       setMarket(prev => ({ ...prev, actual: feedbackMarketState(prev.actual, res) })); // Update with post-clearing prices and frequency
@@ -594,7 +627,7 @@ export default function App() {
     }
 
     // --- ENTERING SETTLEMENT (Elexon Calculation) ---
-    if (phase === "SETTLED") {
+    if (phase === "SETTLED" || phase === "RESULTS" || phase === "BM_CLOSE") {
       const settleSp = old.sp; // Use the SP that just completed, NOT the current sp
       // Bug #11 fix: capture the market state NOW before the timeout fires,
       // otherwise at fast tick speeds market.actual may belong to the NEXT SP.
@@ -1156,6 +1189,7 @@ export default function App() {
     }
     const commonProps = {
       market, sp, msLeft, phase, tickSpeed, spContracts, pid, cash, daCash, spHistory, leaderboard, assetKey: asset,
+      day, bmSubPhase,
       myBid, setMyBid, submitted, onSubmit: submitBid,
       daMyBid, setDaMyBid, daSubmitted, onDaSubmit: submitDaBid,
       idMyOrder, setIdMyOrder, idSubmitted, onIdSubmit: submitIdOrder,
@@ -1167,13 +1201,6 @@ export default function App() {
       onTickSpeedChange: instructorSetSpeed, onPauseToggle: instructorTogglePause, onNextPhase: instructorNextPhase,
       onExecuteEvent: instructorTrigger, onScenarioChange: instructorSetScenario, soc, players,
       physicalState, setPhysicalState,
-      nesoNivOverride,
-      onSetManualNiv: (mode, niv) => {
-        if (api && room) {
-          api.updateRoom(room, { nesoNivMode: mode, nesoNiv: mode === "manual" ? niv : null });
-        }
-        setNesoNivOverride(mode === "manual" ? niv : null);
-      },
       // ─── Scoring Engine data ───
       playerScores, leaderboardData, systemState, overallScoreHistory,
       getScoreColor, getRankLabel, generatePlayerNarrative,
@@ -1504,7 +1531,7 @@ function MarketCenter({ market, allBids, simRes, spHistory, pid, assetKey }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", borderBottom: "1px solid #1a3045", flexShrink: 0 }}>
-        <BM label="NET IMBALANCE" val={`${niv >= 0 ? "+" : ""}${f0(niv)} MW`} vc={isShort ? "#f0455a" : "#1de98b"} sub={isShort ? "SHORT — ESO buys MW" : "LONG — ESO sells MW"} tip="NIV: Negative = SHORT (needs MW). Positive = LONG (surplus MW). ESO procures from cheapest available offers." />
+        <BM label="NET IMBALANCE" val={`${niv >= 0 ? "+" : ""}${f0(niv)} MW`} vc={isShort ? "#f0455a" : "#1de98b"} sub={isShort ? "SHORT — ESO buys MW" : "LONG — ESO sells MW"} tip="NIV: Negative = SHORT (needs MW). Positive = LONG (surplus MW). ESO balances through accepted BM actions." />
         <BM label="FREQUENCY" val={`${freq.toFixed(3)} Hz`} vc={freq < 49.75 ? "#f0455a" : freq > 50.25 ? "#38c0fc" : "#1de98b"} sub="Target 50.000 Hz" border tip="Grid frequency. 50Hz = balanced. Falls below 50 when SHORT, rises when LONG." />
         <BM label="SYSTEM BUY PRICE" val={`£${f1(sbp)}`} vc="#f5b222" sub="Sellers earn this" border tip="SBP — price ESO pays when SHORT. Ceiling for seller revenue this SP." />
         <BM label="SYSTEM SELL PRICE" val={`£${f1(ssp)}`} vc="#38c0fc" sub="Buyers earn this" border tip="SSP — price ESO receives when LONG. Buyers earn this as revenue." />
@@ -1635,8 +1662,9 @@ function AssetPanel({ market, soc, cash, daCash, myBid, setMyBid, submitted, onS
   const canJoin = def.sides === "both" || (def.sides === "short" && isShort) || (def.sides === "long" && !isShort);
   const ref = isShort ? sbp : ssp, pn = +myBid.price;
   const ok = myBid.price && !isNaN(pn) && (isShort ? pn <= ref * 1.05 : pn >= ref * 0.95);
-  const isDaPhase = phase === "DA";
-  const canSub = canJoin && !submitted && myBid.price && !isNaN(pn) && +myBid.mw > 0 && +myBid.mw <= avail + 0.5 && phase === "BM";
+  const isDaPhase = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase);
+  const isBm = ["BM", "BM_OPEN", "REALTIME"].includes(phase);
+  const canSub = canJoin && !submitted && myBid.price && !isNaN(pn) && +myBid.mw > 0 && +myBid.mw <= avail + 0.5 && isBm;
   const qPrices = isShort ? [{ val: Math.round(sbp * 0.60), label: "Aggressive", sub: "60% SBP" }, { val: Math.round(sbp * 0.82), label: "Moderate", sub: "82% SBP" }, { val: Math.round(sbp * 0.97), label: "At market", sub: "≈SBP" }] : [{ val: Math.round(ssp * 1.38), label: "Aggressive", sub: "138% SSP" }, { val: Math.round(ssp * 1.14), label: "Moderate", sub: "114% SSP" }, { val: Math.round(ssp * 0.97), label: "At market", sub: "≈SSP" }];
   const smartBid = () => { let sp; if (def.key === "WIND") sp = 5; else if (def.key === "DSR") sp = isShort ? Math.round(sbp * 0.45) : Math.round(ssp * 1.45); else if (def.key === "OCGT") sp = Math.round(sbp * 0.85); else if (def.key === "HYDRO") sp = isShort ? Math.round(sbp * 0.70) : Math.round(ssp * 1.22); else sp = isShort ? Math.round(sbp * 0.78) : Math.round(ssp * 1.18); setMyBid(b => ({ ...b, price: String(sp), mw: Math.min(Math.floor(avail), def.maxMW) })); };
   const myBidObj = (myBid.price && !isNaN(+myBid.price) && +myBid.mw > 0) ? { id: pid || "preview", name: "You", asset: assetKey, mw: +myBid.mw, price: +myBid.price, side: isShort ? "offer" : "bid", col: def.col, isBot: false } : null;
@@ -1668,15 +1696,15 @@ function AssetPanel({ market, soc, cash, daCash, myBid, setMyBid, submitted, onS
         <div style={{ background: "#0c1c2a", border: "1px solid #1a3045", borderRadius: 9, padding: 10 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 7 }}>
             <div style={{ fontSize: 8.5, color: "#4d7a96", textTransform: "uppercase", letterSpacing: .8 }}>{isShort ? "You are a SELLER — Submit Offer" : "You are a BUYER — Submit Bid"}</div>
-            <button onClick={smartBid} disabled={submitted || phase !== "BM"} style={{ padding: "3px 8px", background: "#102332", border: "1px solid #234159", borderRadius: 4, color: "#38c0fc", fontSize: 8, cursor: "pointer", fontWeight: 700 }}>✦ Smart</button>
+            <button onClick={smartBid} disabled={submitted || !isBm} style={{ padding: "3px 8px", background: "#102332", border: "1px solid #234159", borderRadius: 4, color: "#38c0fc", fontSize: 8, cursor: "pointer", fontWeight: 700 }}>✦ Smart</button>
           </div>
           <div style={{ fontSize: 8, color: "#4d7a96", marginBottom: 2 }}>VOLUME (MW) — {f0(avail)} MW available</div>
           <div style={{ display: "flex", gap: 5, marginBottom: 7 }}>
-            <input type="number" value={myBid.mw} min={1} max={avail} disabled={submitted || phase !== "BM"} onChange={e => setMyBid(b => ({ ...b, mw: Math.max(1, Math.min(+e.target.value || 1, def.maxMW)) }))} style={{ flex: 1, padding: "7px 9px", background: "#102332", border: "1px solid #234159", borderRadius: 5, color: "#ddeeff", fontSize: 13, fontFamily: "'JetBrains Mono'" }} />
-            <button onClick={() => setMyBid(b => ({ ...b, mw: Math.floor(avail) }))} disabled={submitted || phase !== "BM"} style={{ padding: "0 9px", background: "#102332", border: "1px solid #234159", borderRadius: 5, color: "#4d7a96", fontSize: 8, cursor: "pointer" }}>MAX</button>
+            <input type="number" value={myBid.mw} min={1} max={avail} disabled={submitted || !isBm} onChange={e => setMyBid(b => ({ ...b, mw: Math.max(1, Math.min(+e.target.value || 1, def.maxMW)) }))} style={{ flex: 1, padding: "7px 9px", background: "#102332", border: "1px solid #234159", borderRadius: 5, color: "#ddeeff", fontSize: 13, fontFamily: "'JetBrains Mono'" }} />
+            <button onClick={() => setMyBid(b => ({ ...b, mw: Math.floor(avail) }))} disabled={submitted || !isBm} style={{ padding: "0 9px", background: "#102332", border: "1px solid #234159", borderRadius: 5, color: "#4d7a96", fontSize: 8, cursor: "pointer" }}>MAX</button>
           </div>
           <div style={{ fontSize: 8, color: "#4d7a96", marginBottom: 2 }}>{isShort ? "OFFER PRICE" : "BID PRICE"} (£/MWh) <span style={{ color: "#2a5570" }}>ref {isShort ? `SBP £${f0(sbp)}` : `SSP £${f0(ssp)}`}</span></div>
-          <input type="number" value={myBid.price} placeholder={`~£${f0(ref * (isShort ? 0.82 : 1.18))}`} disabled={submitted || phase !== "BM"} onChange={e => setMyBid(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "7px 9px", background: "#102332", border: `1px solid ${myBid.price ? (ok ? "#1de98b44" : "#f0455a44") : "#234159"}`, borderRadius: 5, color: "#ddeeff", fontSize: 13, fontFamily: "'JetBrains Mono'", marginBottom: 3 }} />
+          <input type="number" value={myBid.price} placeholder={`~£${f0(ref * (isShort ? 0.82 : 1.18))}`} disabled={submitted || !isBm} onChange={e => setMyBid(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "7px 9px", background: "#102332", border: `1px solid ${myBid.price ? (ok ? "#1de98b44" : "#f0455a44") : "#234159"}`, borderRadius: 5, color: "#ddeeff", fontSize: 13, fontFamily: "'JetBrains Mono'", marginBottom: 3 }} />
           {myBid.price && <div style={{ fontSize: 7.5, color: ok ? "#1de98b" : "#f5b222", marginBottom: 5 }}>{ok ? "✓ Competitive — likely accepted in merit order" : "⚠ Aggressive — risk being out-competed"}</div>}
           {myBidObj && (
             <div className="fadeIn" style={{ background: previewMine ? "#071f13" : "#0c0c18", border: `1px solid ${previewMine ? "#1de98b33" : "#2a5570"}`, borderRadius: 7, padding: "7px 9px", marginBottom: 6 }}>
@@ -1691,13 +1719,13 @@ function AssetPanel({ market, soc, cash, daCash, myBid, setMyBid, submitted, onS
           )}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 4, marginBottom: 7 }}>
             {qPrices.map((q, i) => (
-              <button key={i} onClick={() => setMyBid(b => ({ ...b, price: String(q.val) }))} disabled={submitted || phase !== "BM"} style={{ padding: "5px 0", background: "#102332", border: `1px solid ${myBid.price === String(q.val) ? "#38c0fc44" : "#234159"}`, borderRadius: 4, color: myBid.price === String(q.val) ? "#38c0fc" : "#4d7a96", fontSize: 7.5, cursor: "pointer", fontFamily: "'JetBrains Mono'", transition: "all .12s" }}>
+              <button key={i} onClick={() => setMyBid(b => ({ ...b, price: String(q.val) }))} disabled={submitted || !isBm} style={{ padding: "5px 0", background: "#102332", border: `1px solid ${myBid.price === String(q.val) ? "#38c0fc44" : "#234159"}`, borderRadius: 4, color: myBid.price === String(q.val) ? "#38c0fc" : "#4d7a96", fontSize: 7.5, cursor: "pointer", fontFamily: "'JetBrains Mono'", transition: "all .12s" }}>
                 <div style={{ fontSize: 6.5, color: "#2a5570", marginBottom: 1 }}>{q.label}</div>£{q.val}<div style={{ fontSize: 6, color: "#1e3d54", marginTop: 1 }}>{q.sub}</div>
               </button>
             ))}
           </div>
           <button onClick={onSubmit} disabled={!canSub} style={{ width: "100%", padding: 10, borderRadius: 6, border: "none", background: submitted ? "#102332" : canSub ? (isShort ? "#f0455a" : "#1de98b") : "#1a3045", color: submitted ? "#4d7a96" : canSub ? "#050e16" : "#4d7a96", fontWeight: 900, fontSize: 13, cursor: canSub ? "pointer" : "default", letterSpacing: .4, fontFamily: "'Outfit'", transition: "all .18s" }}>
-            {submitted ? "✓ SUBMITTED" : phase !== "BM" ? "AWAITING BM PHASE..." : `${isShort ? "SELL — SUBMIT OFFER" : "BUY — SUBMIT BID"} →`}
+            {submitted ? "✓ SUBMITTED" : !isBm ? "AWAITING BM PHASE..." : `${isShort ? "SELL — SUBMIT OFFER" : "BUY — SUBMIT BID"} →`}
           </button>
         </div>
       ) : !isDaPhase && (

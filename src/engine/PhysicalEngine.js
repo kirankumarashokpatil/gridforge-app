@@ -49,8 +49,8 @@ export function updateSystemState(state, spData) {
 export function computePlayerSystemImpact(playerImbalance, systemNIV) {
     if (playerImbalance === 0) return 0;
 
-    // If system is short (negative NIV) and player injected (positive imbalance), player helped
-    // If system is long (positive NIV) and player absorbed (negative imbalance), player helped
+    // If system is short (negative NIV) and player injected (positive imbalance), player helped.
+    // If system is long (positive NIV) and player absorbed (negative imbalance), player helped.
     // The metric: how much did |NIV| decrease because of this player?
 
     const nivWithout = Math.abs(systemNIV - playerImbalance); // hypothetical |NIV| if player wasn't there

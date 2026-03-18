@@ -175,18 +175,16 @@ export default function NESOScreen(props) {
         market, sp, msLeft, tickSpeed, phase,
         leaderboard = [], spHistory = [], allBids = [], players = [],
         onNextPhase, onExecuteEvent, onPauseToggle, paused, freqBreachSec,
-        onSetManualNiv, lastRes, daOrderBook, daResult, idOrderBook, spContracts, currentSp, simRes, ready
+        lastRes, daOrderBook, daResult, idOrderBook, spContracts, currentSp, simRes, ready
     } = props;
 
     const [selectedEvent, setSelectedEvent] = useState(null);
-    const [nivMode, setNivMode] = useState("auto"); // "auto" | "manual"
-    const [manualNiv, setManualNiv] = useState(0);
     const [manualDispatch, setManualDispatch] = useState(false);
     const [selectedBids, setSelectedBids] = useState(new Set());
     const [demandSurge, setDemandSurge] = useState(0); // -0.1 to +0.1 (±10% demand injection)
 
     // ── Derive ALL data from real game state ─────────────────────────────────
-    const currentMkt = phase === "DA" ? market?.forecast : market?.actual;
+    const currentMkt = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase) ? market?.forecast : market?.actual;
     const { freq = 50, niv = 0, isShort = false, sbp = 0, ssp = 0, wf = 0.5, event = null } = currentMkt || {};
 
     // Grid stress level banner based on live NIV
@@ -634,36 +632,35 @@ export default function NESOScreen(props) {
                 <div style={{ marginBottom: 5 }}>
                     <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 4 }}>
                         <span style={{ fontSize: 11, color: "#64748b" }}>Net Imbalance (NIV)</span>
-                        <span style={{ fontSize: 22, fontWeight: "bold", color: niv < 0 ? "#22d3ee" : "#f97316", marginLeft: "auto", fontFamily: "'JetBrains Mono'" }}>
+                        <span style={{ fontSize: 22, fontWeight: "bold", color: isShort ? "#f97316" : "#22d3ee", marginLeft: "auto", fontFamily: "'JetBrains Mono'" }}>
                             <Counter value={niv} decimals={0} suffix=" MW" />
                         </span>
                     </div>
                     <NIVBar value={niv} />
                 </div>
 
-                {/* NIV Control Toggle */}
+                {/* NIV Derivation Status */}
                 <div style={{ padding: "8px 10px", background: "#0d1f35", borderRadius: 4, border: "1px solid #1a3045" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                        <span style={{ fontSize: 10, color: "#64748b", fontWeight: 700, letterSpacing: "0.1em" }}>NIV CONTROL</span>
-                        <div style={{ display: "flex", gap: 4 }}>
-                            <button onClick={() => { setNivMode("auto"); onSetManualNiv && onSetManualNiv("auto", 0); }} style={{ padding: "2px 8px", borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: "pointer", border: "1px solid", background: nivMode === "auto" ? "#22c55e22" : "#0c1c2a", borderColor: nivMode === "auto" ? "#22c55e" : "#1a3045", color: nivMode === "auto" ? "#22c55e" : "#4d7a96" }}>AUTO</button>
-                            <button onClick={() => { setNivMode("manual"); onSetManualNiv && onSetManualNiv("manual", manualNiv); }} style={{ padding: "2px 8px", borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: "pointer", border: "1px solid", background: nivMode === "manual" ? "#f5b22222" : "#0c1c2a", borderColor: nivMode === "manual" ? "#f5b222" : "#1a3045", color: nivMode === "manual" ? "#f5b222" : "#4d7a96" }}>MANUAL</button>
+                        <span style={{ fontSize: 10, color: "#64748b", fontWeight: 700, letterSpacing: "0.1em" }}>NIV STATUS</span>
+                        <span style={{ fontSize: 9, color: "#22c55e", fontWeight: 700 }}>MARKET-DERIVED</span>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                        <div style={{ background: "#0c1c2a", border: "1px solid #1a3045", borderRadius: 4, padding: "6px 8px" }}>
+                            <div style={{ fontSize: 8, color: "#4d7a96", marginBottom: 2 }}>Indicative NIV (pre-BM)</div>
+                            <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 12, color: "#38c0fc", fontWeight: 700 }}>
+                                {currentMkt?.indicativeNiv !== undefined ? `${f0(currentMkt.indicativeNiv)} MW` : "—"}
+                            </div>
+                        </div>
+                        <div style={{ background: "#0c1c2a", border: "1px solid #1a3045", borderRadius: 4, padding: "6px 8px" }}>
+                            <div style={{ fontSize: 8, color: "#4d7a96", marginBottom: 2 }}>Final NIV (post-BM)</div>
+                            <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 12, color: isShort ? "#f97316" : "#22d3ee", fontWeight: 700 }}>
+                                {f0(niv)} MW
+                            </div>
                         </div>
                     </div>
-                    {nivMode === "manual" && (
-                        <div>
-                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#4d7a96", marginBottom: 3 }}>
-                                <span>−600 MW (Long)</span><span>0</span><span>+600 MW (Short)</span>
-                            </div>
-                            <input type="range" min={-600} max={600} value={manualNiv} onChange={e => { const v = +e.target.value; setManualNiv(v); onSetManualNiv && onSetManualNiv("manual", v); }}
-                                style={{ width: "100%", accentColor: "#f5b222" }} />
-                            <div style={{ textAlign: "center", fontSize: 14, fontWeight: 700, color: "#f5b222", fontFamily: "'JetBrains Mono'", marginTop: 4 }}>
-                                {manualNiv > 0 ? "+" : ""}{manualNiv} MW
-                            </div>
-                        </div>
-                    )}
-                    <div style={{ fontSize: 9, color: "#4d7a96", marginTop: 4 }}>
-                        {nivMode === "auto" ? "NIV is calculated automatically from market supply/demand." : "Set NIV manually for each SP. This overrides the market calculation."}
+                    <div style={{ fontSize: 9, color: "#4d7a96", marginTop: 6 }}>
+                        NIV is an outcome of imbalance and accepted BM actions, not a manual control.
                     </div>
                 </div>
 

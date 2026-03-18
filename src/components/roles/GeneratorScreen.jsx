@@ -26,7 +26,7 @@ export default function GeneratorScreen(props) {
     // Lookup Asset details
     const def = ASSETS[assetKey] || ASSETS.BESS_S;
     const isShort = market?.actual?.isShort || market?.forecast?.isShort;
-    const currentMkt = phase === "DA" ? market?.forecast : market?.actual;
+    const currentMkt = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase) ? market?.forecast : market?.actual;
     const sbp = currentMkt?.sbp || 50; const ssp = currentMkt?.ssp || 50;
 
     // Revenue calculations
@@ -211,9 +211,9 @@ export default function GeneratorScreen(props) {
     );
 
     // --- SECTION 3: MARKET BIDS ---
-    const isDa = phase === "DA";
+    const isDa = ["DA", "IDA1", "IDA2"].includes(phase);
     const isId = phase === "ID";
-    const isBm = phase === "BM";
+    const isBm = ["BM", "BM_OPEN", "REALTIME"].includes(phase);
 
     const sect3Bids = (
         <div style={{ flex: 1, background: "#08141f", border: "1px solid #1a3045", borderRadius: 8, padding: 16, display: "flex", flexDirection: "column" }}>
@@ -343,11 +343,11 @@ export default function GeneratorScreen(props) {
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: "auto" }}>
                         <div>
                             <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 6, display: "block" }}>FLEX VOLUME (MW)</label>
-                            <input type="number" value={myBid.mw} disabled={submitted || phase !== "BM"} onChange={e => setMyBid(b => ({ ...b, mw: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#ddeeff", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
+                            <input type="number" value={myBid.mw} disabled={submitted || !isBm} onChange={e => setMyBid(b => ({ ...b, mw: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#ddeeff", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
                         </div>
                         <div>
                             <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 6, display: "block" }}>BID PRICE £/MWh</label>
-                            <input type="number" value={myBid.price} placeholder={`~£${f0((isShort ? sbp * SYSTEM_PARAMS.bidStrategyMultipliers.genBM.sbpMultiplier : ssp * SYSTEM_PARAMS.bidStrategyMultipliers.genBM.sspMultiplier))}`} disabled={submitted || phase !== "BM"} onChange={e => setMyBid(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#1de98b", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
+                            <input type="number" value={myBid.price} placeholder={`~£${f0((isShort ? sbp * SYSTEM_PARAMS.bidStrategyMultipliers.genBM.sbpMultiplier : ssp * SYSTEM_PARAMS.bidStrategyMultipliers.genBM.sspMultiplier))}`} disabled={submitted || !isBm} onChange={e => setMyBid(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#1de98b", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
                         </div>
                     </div>
                     {!!def.minMw && Number(myBid.mw) > 0 && Number(myBid.mw) < def.minMw && (
@@ -361,8 +361,8 @@ export default function GeneratorScreen(props) {
                             Risk of plant trip if only partially cleared!
                         </div>
                     )}
-                    <button data-testid="gen-submit-bm" onClick={onSubmit} disabled={submitted || phase !== "BM" || !myBid.price} style={{ marginTop: 16, width: "100%", padding: "12px", background: submitted || phase !== "BM" ? "#1a3045" : (isShort ? "#f0455a" : "#1de98b"), border: "none", borderRadius: 6, color: submitted || phase !== "BM" ? "#4d7a96" : "#050e16", fontWeight: 800, fontSize: 12, cursor: submitted || phase !== "BM" ? "default" : "pointer" }}>
-                        {phase !== "BM" ? "AWAITING BM PHASE..." : submitted ? "✓ BM BID SUBMITTED" : `SUBMIT ${isShort ? "OFFER" : "BID"} TO NESO →`}
+                    <button data-testid="gen-submit-bm" onClick={onSubmit} disabled={submitted || !isBm || !myBid.price} style={{ marginTop: 16, width: "100%", padding: "12px", background: submitted || !isBm ? "#1a3045" : (isShort ? "#f0455a" : "#1de98b"), border: "none", borderRadius: 6, color: submitted || !isBm ? "#4d7a96" : "#050e16", fontWeight: 800, fontSize: 12, cursor: submitted || !isBm ? "default" : "pointer" }}>
+                        {!isBm ? "AWAITING BM PHASE..." : submitted ? "✓ BM BID SUBMITTED" : `SUBMIT ${isShort ? "OFFER" : "BID"} TO NESO →`}
                     </button>
                 </>
             )}

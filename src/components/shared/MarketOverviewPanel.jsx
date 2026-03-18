@@ -5,11 +5,16 @@ import SupplyDemandCurve from './SupplyDemandCurve';
 
 export default function MarketOverviewPanel({ phase, daOrderBook, daResult, idOrderBook, spContracts, currentSp, msLeft, tickSpeed, bmOrderBook, market, simRes }) {
 
-    // We need to pass the appropriate data to each chart based on the phase
+    // Map new phase names to display groups
+    const isAuctionPhase = ["DA", "IDA1", "IDA2"].includes(phase);
+    const isIdPhase = phase === "ID";
+    const isBmPhase = ["BM", "BM_OPEN", "BM_CLOSE", "REALTIME"].includes(phase);
+    const isResultPhase = ["SETTLED", "RESULTS"].includes(phase);
+    const isWaitPhase = ["FORECAST"].includes(phase);
 
     return (
         <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-            {phase === "DA" && (
+            {isAuctionPhase && (
                 <DayAheadCurve
                     bids={Object.values(daOrderBook || {})}
                     marketForecast={market?.forecast}
@@ -17,7 +22,7 @@ export default function MarketOverviewPanel({ phase, daOrderBook, daResult, idOr
                 />
             )}
 
-            {phase === "ID" && (
+            {isIdPhase && (
                 <IntradayDepthChart
                     idOrderBook={idOrderBook}
                     spContracts={spContracts}
@@ -27,18 +32,26 @@ export default function MarketOverviewPanel({ phase, daOrderBook, daResult, idOr
                 />
             )}
 
-            {(phase === "BM" || phase === "SETTLED") && (
+            {(isBmPhase || isResultPhase) && (
                 <SupplyDemandCurve
                     allBids={Object.values(bmOrderBook || {})}
-                    market={phase === "BM" ? market?.actual : (market?.actual || market?.forecast)}
+                    market={isBmPhase ? market?.actual : (market?.actual || market?.forecast)}
                     simRes={simRes}
                 />
             )}
 
-            {/* If somehow no phase matches, show a placeholder */}
-            {!["DA", "ID", "BM", "SETTLED"].includes(phase) && (
-                <div style={{ flex: 1, display: "flex", alignItems: "center", justifyItems: "center", background: "#08141f", border: "1px solid #1a3045", borderRadius: 8, color: "#4d7a96", fontSize: 10 }}>
-                    <div style={{ margin: "auto" }}>Awaiting Market Phase...</div>
+            {/* FORECAST / unknown phase placeholder */}
+            {isWaitPhase && (
+                <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", background: "#08141f", border: "1px solid #1a3045", borderRadius: 8, color: "#a78bfa", fontSize: 12, flexDirection: "column", gap: 8 }}>
+                    <div style={{ fontSize: 28 }}>🔮</div>
+                    <div style={{ fontWeight: 700 }}>FORECAST PHASE</div>
+                    <div style={{ fontSize: 10, color: "#4d7a96" }}>NESO is preparing market forecasts for all 48 SPs...</div>
+                </div>
+            )}
+
+            {!isAuctionPhase && !isIdPhase && !isBmPhase && !isResultPhase && !isWaitPhase && (
+                <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", background: "#08141f", border: "1px solid #1a3045", borderRadius: 8, color: "#4d7a96", fontSize: 10 }}>
+                    <div>Awaiting Market Phase...</div>
                 </div>
             )}
         </div>

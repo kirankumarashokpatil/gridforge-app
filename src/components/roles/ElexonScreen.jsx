@@ -404,15 +404,15 @@ const SettlementTimelinePanel = ({ phase, activeRun, C, S }) => {
         return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date());
     }, []);
 
-    const PHASE_PROGRESS = { DA: 0, ID: 0, BM: 1, SETTLED: 2 };
-    const timelineProgress = PHASE_PROGRESS[phase] || 0;
+    const PHASE_PROGRESS = { FORECAST: 0, DA: 0, IDA1: 0, IDA2: 0, ID: 0, BM: 1, BM_OPEN: 1, BM_CLOSE: 1, REALTIME: 1, SETTLED: 2, RESULTS: 2 };
+    const timelineProgress = PHASE_PROGRESS[phase] ?? 0;
 
     return (
         <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
             {/* Settlement Timeline */}
             <div style={S.panel}>
                 <div style={S.panelTitle}>Settlement Timeline</div>
-                <TimelineRun label="Initial Settlement (II)" runs={["Issue", "D+1", "D+2"]} current={timelineProgress} desc={phase === "SETTLED" ? "Complete" : "Processing"} />
+                <TimelineRun label="Initial Settlement (II)" runs={["Issue", "D+1", "D+2"]} current={timelineProgress} desc={(phase === "SETTLED" || phase === "RESULTS") ? "Complete" : "Processing"} />
                 <TimelineRun label="First Reconciliation (R1)" runs={["D+5", "D+14", "D+28"]} current={0} desc="Scheduled" />
                 <TimelineRun label="Final Reconciliation (RF)" runs={["D+14m", "D+17m", "D+28m"]} current={0} desc="Future" />
 
@@ -427,7 +427,7 @@ const SettlementTimelinePanel = ({ phase, activeRun, C, S }) => {
                     </thead>
                     <tbody>
                         {[
-                            { run: "II", date: dateStr, status: phase === "SETTLED" ? "Complete" : "Processing", c: phase === "SETTLED" ? "#22c55e" : "#92400e", bg: phase === "SETTLED" ? "#22c55e22" : "#f5b22233" },
+                            { run: "II", date: dateStr, status: (phase === "SETTLED" || phase === "RESULTS") ? "Complete" : "Processing", c: (phase === "SETTLED" || phase === "RESULTS") ? "#22c55e" : "#92400e", bg: (phase === "SETTLED" || phase === "RESULTS") ? "#22c55e22" : "#f5b22233" },
                             { run: "R1", date: "+14 days", status: "Scheduled", c: "#3b82f6", bg: "#3b82f622" },
                             { run: "RF", date: "+14 months", status: "Future", c: "#4d7a96", bg: "#1a3045" },
                         ].map(r => (
@@ -555,8 +555,8 @@ export default function ElexonScreen(props) {
 
     const topRight = (
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <div style={{ padding: "6px 12px", background: phase === "SETTLED" ? "#071f13" : "#0c1c2a", border: `1px solid ${phase === "SETTLED" ? "#1de98b" : "#1a3045"}`, borderRadius: 6, color: phase === "SETTLED" ? "#1de98b" : "#4d7a96", fontWeight: 800, fontSize: 11, fontFamily: "'Outfit'" }}>
-                {phase === "SETTLED" ? "✓ SETTLEMENT ACTIVE" : `⏳ AWAITING ${phase} → SETTLED`}
+            <div style={{ padding: "6px 12px", background: (phase === "SETTLED" || phase === "RESULTS") ? "#071f13" : "#0c1c2a", border: `1px solid ${(phase === "SETTLED" || phase === "RESULTS") ? "#1de98b" : "#1a3045"}`, borderRadius: 6, color: (phase === "SETTLED" || phase === "RESULTS") ? "#1de98b" : "#4d7a96", fontWeight: 800, fontSize: 11, fontFamily: "'Outfit'" }}>
+                {(phase === "SETTLED" || phase === "RESULTS") ? "✓ SETTLEMENT ACTIVE" : `⏳ AWAITING ${phase} → RESULTS`}
             </div>
         </div>
     );

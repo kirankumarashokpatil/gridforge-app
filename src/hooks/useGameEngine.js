@@ -1,28 +1,18 @@
-import { useEffect, useRef, useCallback } from "react";
-import { ASSETS, SP_DURATION_H, FORGIVENESS, ROLES, SCORING_CONFIG } from "../shared/constants.js";
-import { f0, spTime } from "../shared/utils.js";
-import { clearBM, feedbackMarketState, clearDA, computeForecasts } from "../engine/MarketEngine.js";
-import { availMW, updateSoF } from "../engine/AssetPhysics.js";
-import { computeImbalanceSettlement } from "../engine/SettlementEngine.js";
-import { computeRoleScore, computeSystemScore, computeOverallScore } from "../engine/ScoringEngine.js";
-import { updateSystemState, computePlayerSystemImpact, updatePlayerImpact, buildPlayerStats } from "../engine/PhysicalEngine.js";
+import { useRef, useCallback } from "react";
 
 /**
- * useGameEngine: Encapsulates core game loop logic
- * 
- * Handles:
- * - Phase transitions (DA → ID → BM_GATE → DELIVERY → SETTLEMENT → DA)
- * - Market clearing and physics updates
- * - Settlement calculations
- * - Player state updates
- * 
- * @param {Object} appState - Current app state (sp, phase, market, players, etc.)
- * @param {Object} playerRefs - References to player-specific state
- * @param {Object} setters - State setter functions
- * @param {Object} callbacks - Callback functions (addToast, etc.)
+ * useGameEngine: Server-authoritative game loop hook.
+ *
+ * Two-tier architecture matching real GB market:
+ *   Day-level: FORECAST → DA → IDA1 → IDA2 → ID  (all 48 SPs at once)
+ *   Real-time: REALTIME → BM_OPEN/BM_CLOSE per SP 1..48
+ *   End:       RESULTS → next day
+ *
+ * All clearing, settlement, and scoring is delegated to the FastAPI backend.
+ * This hook translates server responses into local React state updates.
  */
 export function useGameEngine(appState, playerRefs, setters, callbacks) {
-  const { addToast } = callbacks;
+  const { addToast, apiRef, room } = callbacks;
   const {
     sp, phase, market, players, spContracts, pid, asset: ak, gameMode, role,
     physicalState, cash, contractPosition, orderbookSnap, daOrderbookSnap
@@ -36,153 +26,159 @@ export function useGameEngine(appState, playerRefs, setters, callbacks) {
 
   const prevPhaseRef = useRef({ phase: "INIT", sp: 0 });
 
+  // Helper — safely call the engine API, return null on error
+  const _call = async (method, ...args) => {
+    try {
+      const fn = apiRef?.[method];
+      if (!fn) { console.warn(`[GameEngine] apiRef.${method} not found`); return null; }
+      return await fn(...args);
+    } catch (err) {
+      console.error(`[GameEngine] ${method} failed:`, err);
+      return null;
+    }
+  };
+
   /**
-   * Handle phase transitions with settlement and market clearing
+   * Handle day-level phase transitions.
+   * Called when advancing through: FORECAST → DA → IDA1 → IDA2 → ID → REALTIME
    */
-  const handlePhaseTransition = useCallback(async (oldPhase, oldSp, gun, room, isInstructor) => {
-    if (!market || !ak) return;
-    // Diagnostic log for phase transition sync
-    console.log('[GameEngine] handlePhaseTransition:', { oldPhase, oldSp, room, isInstructor });
-    if (gun && room) {
-      console.log('[GameEngine] GunDB sync state:', {
-        gunReady: !!gun,
-        room,
-        market,
-        players,
-        spContracts,
-        phase,
-        sp
-      });
-    }
+  const handleDayPhaseTransition = useCallback(async (oldPhase, roomId) => {
+    const rid = roomId || room;
+    if (!rid) return;
+    console.log('[GameEngine] handleDayPhaseTransition:', { oldPhase, rid });
 
-    const myDef = { ...ASSETS[ak], ...(playerRefs.assetConfig || {}) };
-    const isGenerator = myDef.kind && ["thermal", "wind", "solar", "hydro"].includes(myDef.kind);
-    const isStorage = myDef.kind === "bess";
+    // Server handles all clearing via advance_day_phase.
+    // We just need to sync local state from the result.
+    const result = await _call('engineAdvanceDayPhase', rid);
+    if (!result) return result;
 
-    // --- DA CLOSED → Calculate Settlement ---
-    if (oldPhase === "DA") {
-      const daArr = [...Object.values(daOrderbookSnap || {}).filter(b => b && b.mw)];
-      const daRes = clearDA(daArr, market.forecast);
-      const mine = daRes.accepted_bids.find(a => a.id === pid);
+    console.log('[GameEngine] Day phase result:', result);
 
-      // Diagnostic log for DA phase
-      console.log('[GameEngine] DA phase:', { daArr, daRes, mine });
-
-      if (mine) {
-        // BUG-008 FIX: use daRes.cp (not myDef.daPrice which doesn't exist)
-        const daRevenue = mine.mwAcc * daRes.cp * SP_DURATION_H;
-
-        // BUG-008 FIX: actually credit the cash
-        setCash(prev => prev + daRevenue);
-        setDaCash(prev => prev + daRevenue);
-        setContractPosition(prev => prev + mine.mwAcc);
-
-        // BUG-008 FIX: store daRev so SETTLED phase can see it (even though
-        // we no longer re-credit it there — this is for display/Elexon audit)
-        setSpContracts(prev => {
-          const next = { ...prev };
-          if (!next[oldSp]) next[oldSp] = {};
-          if (!next[oldSp][pid]) next[oldSp][pid] = {};
-          next[oldSp][pid].daRev = daRevenue;
-          return next;
-        });
-      }
-    }
-
-    // --- BM GATE CLOSED → DELIVERY (Actual Physical Dispatch) ---
-    if (oldPhase === "BM_GATE") {
-      const bmArr = [...Object.values(orderbookSnap || {}).filter(b => b && b.mw)];
-      const res = clearBM(bmArr, market.actual);
-      // Diagnostic log for BM phase
-      console.log('[GameEngine] BM phase:', { bmArr, res });
-      setMarket(prev => ({ ...prev, actual: feedbackMarketState(prev.actual, res) }));
-      const mine = res.accepted.find(a => a.id === pid);
-
-      let startupDeduction = 0;
-      if (mine && myDef.startupCost) {
-        const prevSpPhysical = spContracts[oldSp - 1]?.[pid]?.physicalAtEndOfSp;
-        const wasOnlineBefore = prevSpPhysical?.status === "ONLINE";
-        if (!wasOnlineBefore) startupDeduction = myDef.startupCost;
-      }
-
-      setSpContracts(prev => {
-        const next = { ...prev };
-        if (!next[oldSp]) next[oldSp] = {};
-        for (const b of res.accepted) {
-          if (!next[oldSp][b.id]) next[oldSp][b.id] = {};
-          next[oldSp][b.id].bmAccepted = { mw: b.mwAcc, price: res.cp, rev: b.revenue };
-          if (b.id === pid && startupDeduction > 0) {
-            next[oldSp][b.id].startupOccurred = true;
+    // After DA clears all 48 SPs: sync positions
+    if (oldPhase === "DA" && result.daResults) {
+      let totalDaRev = 0;
+      const allResults = result.daResults;
+      for (const [spKey, spResult] of Object.entries(allResults)) {
+        for (const acc of (spResult.accepted_bids || [])) {
+          if (acc.id === pid || acc.player_id === pid) {
+            totalDaRev += acc.revenue || 0;
           }
         }
-        return next;
-      });
-
-      // BM revenue (already net of wear via clearBM) minus startup if applicable
-      const netRevenue = (mine?.revenue || 0) - startupDeduction;
-      setCash(prev => prev + netRevenue);
+      }
+      if (totalDaRev) {
+        setCash(prev => prev + totalDaRev);
+        setDaCash(prev => prev + totalDaRev);
+      }
     }
 
-    // --- SETTLEMENT: Calculate imbalance and update scores ---
-    if (oldPhase === "SETTLEMENT" && market.actual) {
-      const myC = spContracts[oldSp]?.[pid] || {};
-      const contractPosMw = contractPosition || 0;
-      const actualPosMw = myC.bmAccepted ? (market.actual.isShort ? myC.bmAccepted.mw : -myC.bmAccepted.mw) : 0;
-
-      // Diagnostic log for SETTLEMENT phase
-      console.log('[GameEngine] SETTLEMENT phase:', { myC, contractPosMw, actualPosMw, marketActual: market.actual });
-
-      let intendedPhysical = myC.bmAccepted
-        ? (market.actual.isShort ? myC.bmAccepted.mw : -myC.bmAccepted.mw)
-        : 0;
-
-      let actualPhysical = contractPosMw + actualPosMw;
-      if (market.actual.trippedAssets?.includes(ak)) {
-        const isDsr = myDef.kind === "dsr";
-        if (!isDsr || !physicalState?.pendingReboundMwh > 0) {
-          actualPhysical = 0;
+    // After IDA1/IDA2 clears all SPs: sync cash
+    if ((oldPhase === "IDA1" || oldPhase === "IDA2")) {
+      const key = `${oldPhase.toLowerCase()}Results`;
+      const idaResults = result[key] || {};
+      let totalRev = 0;
+      for (const [spKey, spResult] of Object.entries(idaResults)) {
+        for (const acc of (spResult.accepted_bids || [])) {
+          if (acc.id === pid || acc.player_id === pid) {
+            totalRev += acc.revenue || 0;
+          }
         }
       }
-
-      const deviation = actualPhysical - contractPosMw;
-      const forgiveMult = gameMode === "TUTORIAL" ? (FORGIVENESS.penaltyMultiplier || 0.5) : 1;
-      const imbPen = deviation >= 0
-        ? (deviation * market.actual.ssp * SP_DURATION_H * forgiveMult)
-        : (deviation * market.actual.sbp * SP_DURATION_H * forgiveMult);
-
-      // BUG-013 FIX: operatingCost removed — wear already netted inside clearBM revenue.
-      // BUG-012 FIX: bmAccepted.rev removed — already credited in BM phase above.
-      // DA revenue also already credited in DA phase — do NOT re-add myC.daRev here.
-      const totalSpRev = imbPen;  // imbalance charge/credit only
-      if (imbPen < -5) {
-        setImbalancePenalty(prev => prev + Math.abs(imbPen));
-      }
-
-      // Update scoring
-      const playerImbalance = deviation;
-      const systemNIV = market.actual.niv;
-      const spImpact = computePlayerSystemImpact(playerImbalance, systemNIV);
-      const isStressSP = Math.abs(systemNIV) > (SCORING_CONFIG.stressNIVThreshold || 300);
-      const deliveredOk = Math.abs(deviation) < 5;
-
-      setSystemState(prev => {
-        const balancingCost = Math.abs(market.actual.niv) * (market.actual.sbp || 50) * 0.01;
-        const updated = updateSystemState(prev, { sp: oldSp, niv: systemNIV, balancingCost, freq: market.actual.freq });
-        updated.playerImpacts = updatePlayerImpact(prev.playerImpacts, pid, spImpact, isStressSP, deliveredOk);
-        return updated;
-      });
-
-      // Store physical state for next SP startup determination
-      setSpContracts(prev => {
-        const next = { ...prev };
-        if (!next[oldSp]) next[oldSp] = {};
-        if (!next[oldSp][pid]) next[oldSp][pid] = {};
-        next[oldSp][pid].physicalAtEndOfSp = { status: physicalState?.status, currentMw: physicalState?.currentMw };
-        return next;
-      });
+      if (totalRev) setCash(prev => prev + totalRev);
     }
-  }, [market, ak, playerRefs, spContracts, pid, gameMode, role, physicalState, contractPosition, orderbookSnap, daOrderbookSnap,
-    setMarket, setCash, setPhysicalState, setSpContracts, setSystemState, setPlayerScores, setOverallScoreHistory, setSpHistory, setImbalancePenalty, setContractPosition, addToast]);
 
-  return { handlePhaseTransition, prevPhaseRef };
-} 
+    return result;
+  }, [room, pid, setCash, setDaCash]);
+
+  /**
+   * Handle BM-level transitions during REALTIME.
+   * Called per-SP: BM_OPEN → BM_CLOSE → next SP → ...
+   */
+  const handleBmAdvance = useCallback(async (roomId) => {
+    const rid = roomId || room;
+    if (!rid) return;
+
+    const result = await _call('engineAdvanceBm', rid);
+    if (!result) return result;
+
+    console.log('[GameEngine] BM advance result:', result);
+
+    // If BM just closed for a SP, sync settlement data
+    if (result.settlement) {
+      const mySettlement = result.settlement[pid];
+      if (mySettlement) {
+        setCash(mySettlement.cash ?? cash);
+        if (mySettlement.imbalancePenalty < -5) {
+          setImbalancePenalty(prev => prev + Math.abs(mySettlement.imbalancePenalty));
+        }
+      }
+    }
+
+    // If BM cleared, sync BM result
+    if (result.bmResult) {
+      const mine = (result.bmResult.accepted || []).find(
+        a => a.id === pid || a.player_id === pid
+      );
+      if (mine) {
+        setCash(prev => prev + (mine.revenue || 0));
+      }
+    }
+
+    // If day ended (RESULTS phase), sync scores
+    if (result.scores) {
+      const myScores = result.scores[pid];
+      if (myScores) {
+        setPlayerScores?.({
+          roleScore: myScores.roleScore,
+          systemScore: myScores.systemScore,
+          overallScore: myScores.overallScore,
+        });
+        setCash(myScores.cash ?? cash);
+      }
+    }
+
+    return result;
+  }, [room, pid, cash, setCash, setImbalancePenalty, setPlayerScores]);
+
+  /**
+   * Legacy phase transition handler — routes to day-level or BM-level.
+   * Kept for backward compatibility with existing UI components.
+   */
+  const handlePhaseTransition = useCallback(async (oldPhase, oldSp, gun, roomId, isInstructor) => {
+    const rid = roomId || room;
+    if (!rid) return;
+    console.log('[GameEngine] handlePhaseTransition (compat):', { oldPhase, oldSp, rid });
+
+    // Day-level phases
+    if (["FORECAST", "DA", "IDA1", "IDA2", "ID", "RESULTS"].includes(oldPhase)) {
+      return handleDayPhaseTransition(oldPhase, rid);
+    }
+
+    // BM phases during REALTIME
+    if (oldPhase === "BM_OPEN" || oldPhase === "BM_CLOSE" || oldPhase === "BM_GATE" || oldPhase === "REALTIME") {
+      return handleBmAdvance(rid);
+    }
+
+    // Settlement compat
+    if (oldPhase === "SETTLEMENT") {
+      const settlements = await _call('engineSettle', rid);
+      if (settlements) {
+        const mySettlement = settlements[pid];
+        if (mySettlement) {
+          setCash(mySettlement.cash ?? cash);
+          if (mySettlement.imbalancePenalty < -5) {
+            setImbalancePenalty(prev => prev + Math.abs(mySettlement.imbalancePenalty));
+          }
+          setPlayerScores?.({
+            roleScore: mySettlement.roleScore,
+            systemScore: mySettlement.systemScore,
+            overallScore: mySettlement.overallScore,
+          });
+        }
+      }
+    }
+  }, [room, pid, cash, physicalState, handleDayPhaseTransition, handleBmAdvance,
+    setMarket, setCash, setDaCash, setContractPosition, setSpContracts,
+    setSystemState, setPlayerScores, setImbalancePenalty, addToast]);
+
+  return { handlePhaseTransition, handleDayPhaseTransition, handleBmAdvance, prevPhaseRef };
+}

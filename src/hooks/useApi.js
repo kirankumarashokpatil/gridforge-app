@@ -36,11 +36,18 @@ export function useApi() {
     ws.onmessage = (event) => {
       const message = JSON.parse(event.data);
       const { type, data, sp, cycle } = message;
-      
-      // Notify all registered listeners
-      listenersRef.current.forEach((callback, key) => {
+
+      // Notify all registered listeners for matching keys.
+      // listenersRef shape: Map<key, Set<callback>>
+      listenersRef.current.forEach((callbacks, key) => {
         if (key === type || key === `${type}_${sp}` || key === `${type}_${cycle}`) {
-          callback(data);
+          for (const cb of callbacks) {
+            try {
+              cb(data);
+            } catch (err) {
+              console.error('[WebSocket] listener callback failed:', err);
+            }
+          }
         }
       });
     };
@@ -56,10 +63,21 @@ export function useApi() {
 
   // Subscribe to updates
   const subscribe = useCallback((key, callback) => {
-    listenersRef.current.set(key, callback);
-    
-    // Return unsubscribe function
-    return () => listenersRef.current.delete(key);
+    if (!listenersRef.current.has(key)) {
+      listenersRef.current.set(key, new Set());
+    }
+    const callbacks = listenersRef.current.get(key);
+    callbacks.add(callback);
+
+    // Return unsubscribe function for this specific callback
+    return () => {
+      const current = listenersRef.current.get(key);
+      if (!current) return;
+      current.delete(callback);
+      if (current.size === 0) {
+        listenersRef.current.delete(key);
+      }
+    };
   }, []);
 
   // API methods replacing Gun operations
@@ -96,6 +114,28 @@ export function useApi() {
     
     // Instructor events
     triggerEvent: (roomId, eventId) => api('POST', `/api/rooms/${roomId}/events`, { eventId, ts: Date.now() }),
+
+    // ── Authoritative Engine Endpoints ──
+    engineRegister: (roomId, data) => api('POST', `/api/rooms/${roomId}/engine/register`, data),
+    engineGetState: (roomId) => api('GET', `/api/rooms/${roomId}/engine/state`),
+    engineGenerateMarket: (roomId, data) => api('POST', `/api/rooms/${roomId}/engine/market`, data || {}),
+    engineAdvancePhase: (roomId) => api('POST', `/api/rooms/${roomId}/engine/advance`),
+    engineAdvanceDayPhase: (roomId) => api('POST', `/api/rooms/${roomId}/engine/advance-day`),
+    engineAdvanceBm: (roomId) => api('POST', `/api/rooms/${roomId}/engine/advance-bm`),
+    engineClearBM: (roomId) => api('POST', `/api/rooms/${roomId}/engine/clear-bm`),
+    engineClearDA: (roomId) => api('POST', `/api/rooms/${roomId}/engine/clear-da`),
+    engineClearDACurves: (roomId) => api('POST', `/api/rooms/${roomId}/engine/clear-da-curves`),
+    engineIdaBid: (roomId, round, data) => api('POST', `/api/rooms/${roomId}/engine/ida/${round}/bid`, data),
+    engineClearIda: (roomId, round) => api('POST', `/api/rooms/${roomId}/engine/ida/${round}/clear`),
+    engineIdaForecast: (roomId, round) => api('GET', `/api/rooms/${roomId}/engine/ida/${round}/forecast`),
+    engineIdSubmit: (roomId, data) => api('POST', `/api/rooms/${roomId}/engine/id/submit`, data),
+    engineIdClear: (roomId) => api('POST', `/api/rooms/${roomId}/engine/id/clear`),
+    engineSettle: (roomId) => api('POST', `/api/rooms/${roomId}/engine/settle`),
+    engineGetForecasts: (roomId) => api('GET', `/api/rooms/${roomId}/engine/forecasts`),
+    enginePublishForecast: (roomId, data) => api('POST', `/api/rooms/${roomId}/engine/forecast/publish`, data || {}),
+    engineSetConfig: (roomId, config) => api('POST', `/api/rooms/${roomId}/engine/config`, config),
+    engineGetLeaderboard: (roomId) => api('GET', `/api/rooms/${roomId}/engine/leaderboard`),
+    engineGetAchievements: (roomId, playerId) => api('GET', `/api/rooms/${roomId}/engine/achievements/${playerId}`),
   });
 
   // Cleanup on unmount

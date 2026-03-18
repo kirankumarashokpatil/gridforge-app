@@ -23,7 +23,7 @@ export default function DsrScreen(props) {
     // Lookup Asset details
     const def = ASSETS[assetKey] || ASSETS.DSR;
     const isShort = market?.actual?.isShort || market?.forecast?.isShort;
-    const currentMkt = phase === "DA" ? market?.forecast : market?.actual;
+    const currentMkt = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase) ? market?.forecast : market?.actual;
     const sbp = currentMkt?.sbp || 50; const ssp = currentMkt?.ssp || 50;
 
     // Revenue calculations
@@ -140,9 +140,9 @@ export default function DsrScreen(props) {
     );
 
     // --- SECTION 3: MARKET BIDS ---
-    const isDa = phase === "DA";
+    const isDa = ["DA", "IDA1", "IDA2"].includes(phase);
     const isId = phase === "ID";
-    const isBm = phase === "BM";
+    const isBm = ["BM", "BM_OPEN", "REALTIME"].includes(phase);
 
     // Re-calculating the user constraints as they type.
     const sect3Bids = (
@@ -255,22 +255,22 @@ export default function DsrScreen(props) {
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: "auto" }}>
                         <div>
                             <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 6, display: "block" }}>FLEX VOLUME (MW)</label>
-                            <input data-testid="dsr-bm-mw" type="number" max={def.maxMW} value={myBid.mw} disabled={submitted || phase !== "BM" || reboundActive} onChange={e => setMyBid(b => ({ ...b, mw: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#ddeeff", fontSize: 14, fontFamily: "'JetBrains Mono'", borderColor: (myBid.mw > def.maxMW) ? "#f0455a" : "#234159" }} />
+                            <input data-testid="dsr-bm-mw" type="number" max={def.maxMW} value={myBid.mw} disabled={submitted || !isBm || reboundActive} onChange={e => setMyBid(b => ({ ...b, mw: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#ddeeff", fontSize: 14, fontFamily: "'JetBrains Mono'", borderColor: (myBid.mw > def.maxMW) ? "#f0455a" : "#234159" }} />
                         </div>
                         <div>
                             <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 6, display: "block" }}>BID PRICE £/MWh</label>
-                            <input data-testid="dsr-bm-price" type="number" value={myBid.price} placeholder={`~£${f0((isShort ? ssp * SYSTEM_PARAMS.bidStrategyMultipliers.dsrBM.sspMultiplier : sbp * SYSTEM_PARAMS.bidStrategyMultipliers.dsrBM.sbpMultiplier))}`} disabled={submitted || phase !== "BM" || reboundActive} onChange={e => setMyBid(b => ({ ...b, price: e.target.value, side: isShort ? "bid" : "offer" }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#1de98b", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
+                            <input data-testid="dsr-bm-price" type="number" value={myBid.price} placeholder={`~£${f0((isShort ? ssp * SYSTEM_PARAMS.bidStrategyMultipliers.dsrBM.sspMultiplier : sbp * SYSTEM_PARAMS.bidStrategyMultipliers.dsrBM.sbpMultiplier))}`} disabled={submitted || !isBm || reboundActive} onChange={e => setMyBid(b => ({ ...b, price: e.target.value, side: isShort ? "bid" : "offer" }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#1de98b", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
                         </div>
                     </div>
                     {reboundActive && (
                         <div style={{ fontSize: 8.5, color: "#f0455a", fontWeight: 700, padding: "6px 0", textAlign: "center" }}>⛔ Forced Rebound Active ({(physicalState?.reboundSpsRemaining || 1) * 30} mins). All bidding locked until rebound complete.</div>
                     )}
-                    {!isAvailableToCurtail && !reboundActive && phase === "BM" && !isShort && (
+                    {!isAvailableToCurtail && !reboundActive && isBm && !isShort && (
                         <div style={{ fontSize: 8.5, color: "#f0455a", fontWeight: 700, padding: "6px 0", textAlign: "center" }}>⛔ Max Duration Hit. Curtailment bids disabled.</div>
                     )}
 
-                    <button data-testid="dsr-submit-bm" onClick={onSubmit} disabled={submitted || phase !== "BM" || reboundActive || (!isAvailableToCurtail && !isShort)} style={{ marginTop: 16, width: "100%", padding: "12px", background: submitted || phase !== "BM" || reboundActive || (!isAvailableToCurtail && !isShort) ? "#1a3045" : (isShort ? "#1de98b" : "#f5b222"), border: "none", borderRadius: 6, color: submitted || phase !== "BM" || reboundActive || (!isAvailableToCurtail && !isShort) ? "#4d7a96" : "#050e16", fontWeight: 800, fontSize: 12, cursor: submitted || phase !== "BM" || reboundActive || (!isAvailableToCurtail && !isShort) ? "default" : "pointer" }}>
-                        {phase !== "BM" ? "AWAITING BM PHASE..." : submitted ? "✓ BM BID SUBMITTED" : (isShort ? "VOLUNTARY EARLIER PAYBACK →" : "OFFER CURTAILMENT →")}
+                    <button data-testid="dsr-submit-bm" onClick={onSubmit} disabled={submitted || !isBm || reboundActive || (!isAvailableToCurtail && !isShort)} style={{ marginTop: 16, width: "100%", padding: "12px", background: submitted || !isBm || reboundActive || (!isAvailableToCurtail && !isShort) ? "#1a3045" : (isShort ? "#1de98b" : "#f5b222"), border: "none", borderRadius: 6, color: submitted || !isBm || reboundActive || (!isAvailableToCurtail && !isShort) ? "#4d7a96" : "#050e16", fontWeight: 800, fontSize: 12, cursor: submitted || !isBm || reboundActive || (!isAvailableToCurtail && !isShort) ? "default" : "pointer" }}>
+                        {!isBm ? "AWAITING BM PHASE..." : submitted ? "✓ BM BID SUBMITTED" : (isShort ? "VOLUNTARY EARLIER PAYBACK →" : "OFFER CURTAILMENT →")}
                     </button>
                 </>
             )}

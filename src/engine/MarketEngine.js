@@ -62,7 +62,7 @@ function forecastSolarIrradiance(trueIrr, sp) {
 }
 
 // ─── Market State for an SP (Forecast vs Actual) ───
-export function marketForSp(sp, scenarioId = "NORMAL", injectedEvents = [], publishedForecast = null, manualNivOverride = null) {
+export function marketForSp(sp, scenarioId = "NORMAL", injectedEvents = [], publishedForecast = null) {
     const sc = SCENARIOS[scenarioId] || SCENARIOS.NORMAL;
     const r = rng(sp * 1337 + 42); // Base RNG for expected state
     const errRng = rng(sp * 9999 + 777); // RNG for forecast errors and surprises
@@ -117,15 +117,18 @@ export function marketForSp(sp, scenarioId = "NORMAL", injectedEvents = [], publ
 
     // debug: log expected wind/solar to diagnose NaN issues
     if (import.meta.env.DEV) console.log('DEBUG forecast', { sp, expectedWind, expectedSolar });
+    const forecastIsShort = baseNIV < 0;
     const forecast = {
         sp,
         hr,
-        niv: manualNivOverride !== null ? clamp(manualNivOverride, -620, 620) : clamp(baseNIV, -620, 620),
-        isShort: manualNivOverride !== null ? manualNivOverride < 0 : baseNIV < 0,
+        niv: clamp(baseNIV, -620, 620),
+        indicativeNiv: clamp(baseNIV, -620, 620),
+        rawImbalanceMw: clamp(baseNIV, -620, 620),
+        isShort: forecastIsShort,
         wf: expectedWind,
         sf: expectedSolar,
-        sbp: clamp((manualNivOverride !== null ? manualNivOverride < 0 : baseNIV < 0) ? expectedRefPrice * 1.32 : expectedRefPrice * 0.82, 10, 900),
-        ssp: clamp((manualNivOverride !== null ? manualNivOverride < 0 : baseNIV < 0) ? expectedRefPrice * 0.72 : expectedRefPrice * 1.22, 5, 800),
+        sbp: clamp(forecastIsShort ? expectedRefPrice * 1.32 : expectedRefPrice * 0.82, 10, 900),
+        ssp: clamp(forecastIsShort ? expectedRefPrice * 0.72 : expectedRefPrice * 1.22, 5, 800),
         baseRef: expectedRefPrice,
         priceFR: expectedPriceFR,
         priceNO: expectedPriceNO,
@@ -165,7 +168,7 @@ export function marketForSp(sp, scenarioId = "NORMAL", injectedEvents = [], publ
     // solar error still adds some noise on top of irradiance
     const trueSolar = clamp(trueIrr + solarError, 0, 1);
 
-    const trueNIV = manualNivOverride !== null ? clamp(manualNivOverride, -620, 620) : clamp(baseNIV + demandErrorMv + (event ? event.niv : 0), -620, 620);
+    const trueNIV = clamp(baseNIV + demandErrorMv + (event ? event.niv : 0), -620, 620);
     const trueIsShort = trueNIV < 0;
     const trueRefPrice = expectedRefPrice + (event ? event.pd : 0) + (trueIsShort ? 25 : -15);
     // Add real-time noise to foreign markets
@@ -181,6 +184,8 @@ export function marketForSp(sp, scenarioId = "NORMAL", injectedEvents = [], publ
         sp,
         hr,
         niv: trueNIV,
+        indicativeNiv: trueNIV,
+        rawImbalanceMw: trueNIV,
         isShort: trueIsShort,
         wf: trueWind,
         sf: trueSolar,
@@ -273,12 +278,13 @@ function generateTrips(r, eventId) {
 
 // ─── Clear Balancing Mechanism ───
 export function clearBM(bids, market) {
-    const { isShort, sbp, ssp, niv } = market;
+    const { isShort, sbp, ssp } = market;
+    const rawImbalanceMw = Number(market?.rawImbalanceMw ?? market?.niv ?? 0);
     const side = isShort ? "offer" : "bid";
     const cands = bids.filter(b => b.side === side && +b.mw > 0 && !isNaN(+b.price))
         .sort((a, b) => isShort ? +a.price - +b.price : +b.price - +a.price);
 
-    let rem = Math.abs(niv);
+    let rem = Math.abs(rawImbalanceMw);
     let cp = isShort ? sbp : ssp;
     const acc = [];
 
@@ -313,11 +319,19 @@ export function clearBM(bids, market) {
         };
     });
 
+    const cleared = Math.abs(rawImbalanceMw) - Math.max(0, rem);
+    const acceptedBuyVolume = isShort ? 0 : cleared;
+    const acceptedSellVolume = isShort ? cleared : 0;
+
     return {
         accepted: result,
         cp,
-        cleared: Math.abs(niv) - Math.max(0, rem),
-        full: rem <= 0.001
+        cleared,
+        full: rem <= 0.001,
+        acceptedBuyVolume,
+        acceptedSellVolume,
+        niv: acceptedBuyVolume - acceptedSellVolume,
+        systemDirection: isShort ? "SHORT" : "LONG",
     };
 }
 
@@ -412,11 +426,12 @@ export function clearDA(bids, market_forecast) {
 
 // ─── Feedback Market State (Post-Clearing Updates) ───
 export function feedbackMarketState(market, clearResult) {
-    const { isShort, niv, baseRef } = market;
-    const { cp, cleared } = clearResult;
+    const { isShort, baseRef } = market;
+    const { cp, cleared, niv: clearedNiv } = clearResult;
+    const rawImbalanceMw = Number(market?.rawImbalanceMw ?? market?.niv ?? 0);
 
     // Post-clearing residual NIV (after BM dispatch)
-    const residualNIV = niv - (isShort ? cleared : -cleared);
+    const residualNIV = rawImbalanceMw - (isShort ? -cleared : cleared);
 
     // Dynamic Frequency based on residual NIV
     const freqDeviation = clamp(-residualNIV / 15000, -0.4, 0.4);
@@ -438,6 +453,8 @@ export function feedbackMarketState(market, clearResult) {
     return {
         ...market,
         freq,
+        niv: clearedNiv,
+        indicativeNiv: rawImbalanceMw,
         sbp: clamp(sbp, 10, 900),
         ssp: clamp(ssp, 5, 800),
         residualNIV

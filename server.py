@@ -18,6 +18,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import asyncpg
 
+# Server-authoritative engine
+from engine import game_loop
+from engine.market_engine import market_for_sp, clear_bm, clear_da, compute_forecasts
+from engine.da_curve_engine import clear_full_auction, validate_full_curve
+from engine.settlement_engine import compute_imbalance_settlement
+from engine.scoring_engine import compute_role_score, compute_system_score, compute_overall_score
+from engine.leaderboard_engine import build_leaderboard, build_round_debrief
+from engine.achievements import build_achievement_stats, check_achievements
+
 # ==================== DATABASE ====================
 
 class Database:
@@ -587,6 +596,439 @@ async def trigger_event(room_id: str, event: Dict[str, Any]):
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== AUTHORITATIVE ENGINE ENDPOINTS ====================
+
+@app.post("/api/rooms/{room_id}/engine/register")
+async def engine_register_player(room_id: str, data: Dict[str, Any]):
+    """Register a player in the server-side game loop"""
+    try:
+        player_id = data.get("playerId")
+        if not player_id:
+            raise HTTPException(status_code=400, detail="playerId required")
+        result = game_loop.register_player(room_id, player_id, data)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/rooms/{room_id}/engine/state")
+async def engine_get_state(room_id: str):
+    """Get the current authoritative room state"""
+    try:
+        return game_loop.get_room_state(room_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/market")
+async def engine_generate_market(room_id: str, data: Optional[Dict[str, Any]] = None):
+    """Generate / refresh market state for the current SP"""
+    try:
+        sp = data.get("sp") if data else None
+        market = game_loop.generate_market(room_id, sp)
+        await manager.broadcast_to_room(room_id, {"type": "market", "data": market})
+        return market
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/advance")
+async def engine_advance_phase(room_id: str):
+    """Advance to the next game phase (day-level or BM SP-level)"""
+    try:
+        result = game_loop.advance_phase(room_id)
+
+        # Persist phase/sp to DB
+        rs = game_loop._get_room(room_id)
+        await db.execute(
+            "UPDATE rooms SET phase = $1, sp = $2, last_active = CURRENT_TIMESTAMP WHERE room_id = $3",
+            rs["dayPhase"], rs["currentSp"], room_id
+        )
+
+        # Broadcast phase change + results
+        await manager.broadcast_to_room(room_id, {
+            "type": "phase_change",
+            "data": result,
+        })
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/advance-day")
+async def engine_advance_day_phase(room_id: str):
+    """Advance to the next day-level phase (FORECAST→DA→IDA1→IDA2→ID→REALTIME)"""
+    try:
+        result = game_loop.advance_day_phase(room_id)
+        rs = game_loop._get_room(room_id)
+        await db.execute(
+            "UPDATE rooms SET phase = $1, sp = $2, last_active = CURRENT_TIMESTAMP WHERE room_id = $3",
+            rs["dayPhase"], rs["currentSp"], room_id
+        )
+        await manager.broadcast_to_room(room_id, {"type": "day_phase_change", "data": result})
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/advance-bm")
+async def engine_advance_bm(room_id: str):
+    """Advance within REALTIME phase (BM_OPEN→BM_CLOSE per SP)"""
+    try:
+        result = game_loop.advance_bm(room_id)
+        rs = game_loop._get_room(room_id)
+        await db.execute(
+            "UPDATE rooms SET phase = $1, sp = $2, last_active = CURRENT_TIMESTAMP WHERE room_id = $3",
+            rs["dayPhase"], rs["currentSp"], room_id
+        )
+        await manager.broadcast_to_room(room_id, {"type": "bm_advance", "data": result})
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/clear-bm")
+async def engine_clear_bm(room_id: str):
+    """Run BM clearing on current SP bids using server engine"""
+    try:
+        rs = game_loop._get_room(room_id)
+        sp = rs["currentSp"] or 1
+        market = rs["markets"].get(sp)
+        if not market:
+            game_loop.generate_all_markets(room_id)
+            market = rs["markets"].get(sp, {})
+
+        # Collect bids from DB
+        bids_rows = await db.query(
+            "SELECT * FROM bm_bids WHERE room_id = $1 AND sp = $2",
+            room_id, sp
+        )
+        bids = [dict(row) for row in bids_rows]
+        actual = market.get("actual", {})
+
+        bm_result = clear_bm(bids, actual)
+
+        # Persist accepted bids & update player cash
+        for accepted in bm_result.get("accepted", []):
+            pid = accepted.get("player_id")
+            if pid:
+                revenue = accepted.get("revenue", 0)
+                await db.execute(
+                    "UPDATE players SET cash = cash + $1, updated_at = CURRENT_TIMESTAMP WHERE player_id = $2 AND room_id = $3",
+                    revenue, pid, room_id
+                )
+
+        await manager.broadcast_to_room(room_id, {"type": "bm_clear", "data": bm_result})
+        return bm_result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/clear-da")
+async def engine_clear_da(room_id: str):
+    """Run DA clearing on all 48 SPs using server engine"""
+    try:
+        rs = game_loop._get_room(room_id)
+        if not rs["markets"]:
+            game_loop.generate_all_markets(room_id)
+
+        # Use the day-level DA close (clears all SPs at once)
+        da_result = game_loop._on_da_close_all(rs)
+
+        # Persist DA revenue per player
+        all_results = da_result.get("daResults", {})
+        for sp_key, sp_result in all_results.items():
+            for accepted in sp_result.get("accepted_bids", []):
+                pid = accepted.get("id") or accepted.get("player_id")
+                if pid:
+                    revenue = accepted.get("revenue", 0)
+                    await db.execute(
+                        "UPDATE players SET da_cash = da_cash + $1, cash = cash + $1, updated_at = CURRENT_TIMESTAMP WHERE player_id = $2 AND room_id = $3",
+                        revenue, pid, room_id
+                    )
+
+        await manager.broadcast_to_room(room_id, {"type": "da_clear", "data": da_result})
+        return da_result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/clear-da-curves")
+async def engine_clear_da_curves(room_id: str):
+    """Run full 48-SP DA curve auction clearing"""
+    try:
+        rs = game_loop._get_room(room_id)
+
+        # Collect DA curves from DB
+        curves_rows = await db.query(
+            "SELECT * FROM da_curves WHERE room_id = $1",
+            room_id
+        )
+        player_curves = []
+        for row in curves_rows:
+            row_dict = dict(row)
+            segments = row_dict.get("segments")
+            if isinstance(segments, str):
+                segments = json.loads(segments)
+            player_curves.append({
+                "playerId": row_dict["player_id"],
+                "segments": segments or [],
+                "side": row_dict.get("side", "sell"),
+            })
+
+        # Build market context from forecast
+        market_ctx_array = None
+        if rs.get("publishedForecast"):
+            pf = rs["publishedForecast"]
+            demand = pf.get("demand", [0] * 48)
+            market_ctx_array = [
+                {"demandMW": demand[i] if i < len(demand) else 300, "forecastPrice": 50}
+                for i in range(48)
+            ]
+
+        result = clear_full_auction(player_curves, market_ctx_array)
+
+        # Persist per-player DA revenues
+        for pid, vols in result.get("volumes", {}).items():
+            total_rev = sum(
+                abs(v) * result["prices"][i] * 0.5
+                for i, v in enumerate(vols)
+            )
+            if total_rev > 0:
+                await db.execute(
+                    "UPDATE players SET da_cash = da_cash + $1, cash = cash + $1, updated_at = CURRENT_TIMESTAMP WHERE player_id = $2 AND room_id = $3",
+                    total_rev, pid, room_id
+                )
+
+        await manager.broadcast_to_room(room_id, {"type": "da_curve_clear", "data": result})
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/ida/{ida_round}/bid")
+async def engine_ida_bid(room_id: str, ida_round: str, request: Request):
+    """Submit IDA bids for multiple SPs"""
+    try:
+        body = await request.json()
+        player_id = body.get("playerId")
+        bids = body.get("bids", [])
+        # Support legacy single-bid format
+        if not bids and body.get("bid"):
+            bids = [body["bid"]]
+        ida_round_upper = ida_round.upper()
+        if ida_round_upper not in ("IDA1", "IDA2"):
+            raise HTTPException(status_code=400, detail=f"Unknown IDA round: {ida_round}")
+        result = game_loop.submit_ida_bids(room_id, ida_round_upper, player_id, bids)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/ida/{ida_round}/clear")
+async def engine_ida_clear(room_id: str, ida_round: str):
+    """Clear IDA1 or IDA2 auction for all 48 SPs"""
+    try:
+        ida_round_upper = ida_round.upper()
+        if ida_round_upper not in ("IDA1", "IDA2"):
+            raise HTTPException(status_code=400, detail=f"Unknown IDA round: {ida_round}")
+        rs = game_loop._get_room(room_id)
+        result = game_loop._on_ida_close_all(rs, ida_round_upper)
+        await manager.broadcast_to_room(room_id, {"type": f"{ida_round.lower()}_clear", "data": result})
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/rooms/{room_id}/engine/ida/{ida_round}/forecast")
+async def engine_ida_forecast(room_id: str, ida_round: str):
+    """Get the updated IDA forecast for all SPs"""
+    try:
+        from engine.market_engine import ida_forecast as ida_fc
+        from engine.constants import IDA_CONFIG
+        ida_round_upper = ida_round.upper()
+        cfg = IDA_CONFIG.get(ida_round_upper, {})
+        err_reduction = cfg.get("forecastErrorReduction", 0.5)
+        rs = game_loop._get_room(room_id)
+        if not rs.get("markets"):
+            raise HTTPException(status_code=400, detail="No markets generated yet")
+        # Return updated forecast for each SP
+        forecasts = {}
+        for sp, market in rs["markets"].items():
+            forecasts[sp] = ida_fc(market, err_reduction)
+        return forecasts
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/id/submit")
+async def engine_id_submit(room_id: str, request: Request):
+    """Submit continuous ID orders for specific SPs"""
+    try:
+        body = await request.json()
+        player_id = body.get("playerId")
+        orders = body.get("orders", [])
+        result = game_loop.submit_id_orders(room_id, player_id, orders)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/id/clear")
+async def engine_id_clear(room_id: str):
+    """Run one round of continuous ID order-book clearing (pay-as-bid)"""
+    try:
+        rs = game_loop._get_room(room_id)
+        result = game_loop._on_id_close(rs)
+
+        # Persist cash changes from ID trades
+        for pid, cash_delta in (result.get("trades") or []):
+            pass  # Trades are already applied to in-memory state
+        # Broadcast trades to room
+        await manager.broadcast_to_room(room_id, {"type": "id_clear", "data": result})
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/settle")
+async def engine_settle(room_id: str):
+    """Run settlement for the current SP"""
+    try:
+        result = game_loop.settle_current_sp(room_id)
+        settlements = result.get("settlements", {})
+
+        # Persist updated scores and cash to DB
+        for pid, s in settlements.items():
+            await db.execute(
+                """UPDATE players 
+                   SET cash = $1, role_score = $2, system_score = $3, overall_score = $4,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE player_id = $5 AND room_id = $6""",
+                s.get("cash", 0),
+                s.get("roleScore", 0),
+                s.get("systemScore", 0),
+                s.get("overallScore", 0),
+                pid, room_id
+            )
+
+        await manager.broadcast_to_room(room_id, {"type": "settlement", "data": settlements})
+        return settlements
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/rooms/{room_id}/engine/forecasts")
+async def engine_get_forecasts(room_id: str):
+    """Get forecasts for upcoming SPs"""
+    try:
+        rs = game_loop._get_room(room_id)
+        forecasts = compute_forecasts(
+            rs["sp"], rs["scenarioId"], rs.get("publishedForecast")
+        )
+        return {"forecasts": forecasts}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/forecast/publish")
+async def engine_publish_forecast(room_id: str, data: Optional[Dict[str, Any]] = None):
+    """Publish a new forecast (manual or auto-generated)"""
+    try:
+        result = game_loop.publish_forecast(room_id, data)
+        await manager.broadcast_to_room(room_id, {"type": "forecast", "data": result})
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rooms/{room_id}/engine/config")
+async def engine_set_config(room_id: str, config: Dict[str, Any]):
+    """Update room configuration (scenario, game mode, tick speed, pause)"""
+    try:
+        result = game_loop.set_room_config(room_id, config)
+
+        # Persist to DB
+        if "scenarioId" in config:
+            await db.execute(
+                "UPDATE rooms SET scenario_id = $1 WHERE room_id = $2",
+                config["scenarioId"], room_id
+            )
+        if "tickSpeed" in config:
+            await db.execute(
+                "UPDATE rooms SET tick_speed = $1 WHERE room_id = $2",
+                config["tickSpeed"], room_id
+            )
+        if "paused" in config:
+            await db.execute(
+                "UPDATE rooms SET paused = $1 WHERE room_id = $2",
+                config["paused"], room_id
+            )
+
+        await manager.broadcast_to_room(room_id, {"type": "config", "data": config})
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/rooms/{room_id}/engine/leaderboard")
+async def engine_get_leaderboard(room_id: str):
+    """Get computed leaderboard from server-side scores"""
+    try:
+        players_rows = await db.query(
+            "SELECT * FROM players WHERE room_id = $1",
+            room_id
+        )
+        players = [
+            {
+                "id": dict(row)["player_id"],
+                "name": dict(row).get("name", ""),
+                "role": dict(row).get("role", "GENERATOR"),
+                "roleScore": dict(row).get("role_score", 0),
+                "systemScore": dict(row).get("system_score", 0),
+                "overallScore": dict(row).get("overall_score", 0),
+                "cash": dict(row).get("cash", 0),
+            }
+            for row in players_rows
+        ]
+
+        leaderboard = build_leaderboard(players)
+        rs = game_loop._get_room(room_id)
+        debrief = build_round_debrief(leaderboard, rs.get("systemState", {}))
+
+        return {"leaderboard": leaderboard, "debrief": debrief}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/rooms/{room_id}/engine/achievements/{player_id}")
+async def engine_get_achievements(room_id: str, player_id: str):
+    """Check achievements for a player"""
+    try:
+        rs = game_loop._get_room(room_id)
+        ps = rs.get("playerStates", {}).get(player_id, {})
+
+        stats = build_achievement_stats({
+            "spHistory": ps.get("spHistory", []),
+            "cash": ps.get("cash", 0),
+            "daCash": ps.get("daCash", 0),
+            "assetKey": ps.get("asset", ""),
+            "assetKind": "",
+            "scenario": rs.get("scenarioId", "NORMAL"),
+            "soc": ps.get("soc", 50),
+            "freqBreachSec": 0,
+        })
+
+        earned = ps.get("achievements", [])
+        newly_earned = check_achievements(stats, earned)
+
+        return {"stats": stats, "newlyEarned": newly_earned, "alreadyEarned": earned}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ==================== WEBSOCKET ====================
 

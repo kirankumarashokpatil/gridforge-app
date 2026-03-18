@@ -26,7 +26,7 @@ export default function BessScreen(props) {
     // Lookup Asset details
     const def = ASSETS[assetKey] || ASSETS.BESS_S;
     const isShort = market?.actual?.isShort || market?.forecast?.isShort;
-    const currentMkt = phase === "DA" ? market?.forecast : market?.actual;
+    const currentMkt = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase) ? market?.forecast : market?.actual;
     const sbp = currentMkt?.sbp || 50; const ssp = currentMkt?.ssp || 50;
 
     // Revenue calculations
@@ -193,9 +193,9 @@ export default function BessScreen(props) {
     );
 
     // --- SECTION 3: MARKET BIDS ---
-    const isDa = phase === "DA";
+    const isDa = ["DA", "IDA1", "IDA2"].includes(phase);
     const isId = phase === "ID";
-    const isBm = phase === "BM";
+    const isBm = ["BM", "BM_OPEN", "REALTIME"].includes(phase);
 
     // Re-calculating the user constraints as they type. DA and ID use simple bid/ask numbers. BM offers direct injection/consumption MW values like generator.
     // Generator positive = discharge (long). BESS is the same. Negative = charge (short)
@@ -342,11 +342,11 @@ export default function BessScreen(props) {
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: "auto" }}>
                         <div>
                             <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 6, display: "block" }}>FLEX VOLUME (MW)</label>
-                            <input type="number" max={isShort ? (contractPosition ? Math.min(def.maxMW, sustainedDischargeMw + (contractPosition > 0 ? (def.maxMWh - maxDischargeMwh) / (def.eff || 1) / 0.5 : 0)) : sustainedDischargeMw) : (contractPosition ? Math.min(def.maxMW, sustainedChargeMw + (contractPosition < 0 ? maxDischargeMwh * (def.eff || 1) / 0.5 : 0)) : sustainedChargeMw)} value={myBid.mw} disabled={submitted || phase !== "BM"} onChange={e => setMyBid(b => ({ ...b, mw: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#ddeeff", fontSize: 14, fontFamily: "'JetBrains Mono'", borderColor: (myBid.mw > (isShort ? sustainedDischargeMw : sustainedChargeMw)) ? "#f0455a" : "#234159" }} />
+                            <input type="number" max={isShort ? (contractPosition ? Math.min(def.maxMW, sustainedDischargeMw + (contractPosition > 0 ? (def.maxMWh - maxDischargeMwh) / (def.eff || 1) / 0.5 : 0)) : sustainedDischargeMw) : (contractPosition ? Math.min(def.maxMW, sustainedChargeMw + (contractPosition < 0 ? maxDischargeMwh * (def.eff || 1) / 0.5 : 0)) : sustainedChargeMw)} value={myBid.mw} disabled={submitted || !isBm} onChange={e => setMyBid(b => ({ ...b, mw: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#ddeeff", fontSize: 14, fontFamily: "'JetBrains Mono'", borderColor: (myBid.mw > (isShort ? sustainedDischargeMw : sustainedChargeMw)) ? "#f0455a" : "#234159" }} />
                         </div>
                         <div>
                             <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 6, display: "block" }}>BID PRICE £/MWh</label>
-                            <input type="number" value={myBid.price} placeholder={`~£${f0((isShort ? sbp * SYSTEM_PARAMS.bidStrategyMultipliers.bessBM.sbpMultiplier : ssp * SYSTEM_PARAMS.bidStrategyMultipliers.bessBM.sspMultiplier))}`} disabled={submitted || phase !== "BM"} onChange={e => setMyBid(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#1de98b", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
+                            <input type="number" value={myBid.price} placeholder={`~£${f0((isShort ? sbp * SYSTEM_PARAMS.bidStrategyMultipliers.bessBM.sbpMultiplier : ssp * SYSTEM_PARAMS.bidStrategyMultipliers.bessBM.sspMultiplier))}`} disabled={submitted || !isBm} onChange={e => setMyBid(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#1de98b", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
                         </div>
                     </div>
                     {myBid.mw > 0 && (
@@ -368,8 +368,8 @@ export default function BessScreen(props) {
                         <div style={{ fontSize: 8.5, color: "#f0455a", fontWeight: 700, padding: "6px 0", textAlign: "center" }}>⛔ Cannot bid above immediate battery limits. Will be rejected.</div>
                     )}
 
-                    <button data-testid="bess-submit-bm" onClick={onSubmit} disabled={submitted || phase !== "BM" || !myBid.price || (myBid.mw > (isShort ? (contractPosition ? Math.min(def.maxMW, sustainedDischargeMw + (contractPosition > 0 ? (def.maxMWh - maxDischargeMwh) / (def.eff || 1) / 0.5 : 0)) : sustainedDischargeMw) : (contractPosition ? Math.min(def.maxMW, sustainedChargeMw + (contractPosition < 0 ? maxDischargeMwh * (def.eff || 1) / 0.5 : 0)) : sustainedChargeMw)))} style={{ marginTop: 16, width: "100%", padding: "12px", background: submitted || phase !== "BM" || (myBid.mw > (isShort ? (contractPosition ? Math.min(def.maxMW, sustainedDischargeMw + (contractPosition > 0 ? (def.maxMWh - maxDischargeMwh) / (def.eff || 1) / 0.5 : 0)) : sustainedDischargeMw) : (contractPosition ? Math.min(def.maxMW, sustainedChargeMw + (contractPosition < 0 ? maxDischargeMwh * (def.eff || 1) / 0.5 : 0)) : sustainedChargeMw))) ? "#1a3045" : (isShort ? "#38c0fc" : "#1de98b"), border: "none", borderRadius: 6, color: submitted || phase !== "BM" || (myBid.mw > (isShort ? (contractPosition ? Math.min(def.maxMW, sustainedDischargeMw + (contractPosition > 0 ? (def.maxMWh - maxDischargeMwh) / (def.eff || 1) / 0.5 : 0)) : sustainedDischargeMw) : (contractPosition ? Math.min(def.maxMW, sustainedChargeMw + (contractPosition < 0 ? maxDischargeMwh * (def.eff || 1) / 0.5 : 0)) : sustainedChargeMw))) ? "#4d7a96" : "#050e16", fontWeight: 800, fontSize: 12, cursor: submitted || phase !== "BM" || (myBid.mw > (isShort ? (contractPosition ? Math.min(def.maxMW, sustainedDischargeMw + (contractPosition > 0 ? (def.maxMWh - maxDischargeMwh) / (def.eff || 1) / 0.5 : 0)) : sustainedDischargeMw) : (contractPosition ? Math.min(def.maxMW, sustainedChargeMw + (contractPosition < 0 ? maxDischargeMwh * (def.eff || 1) / 0.5 : 0)) : sustainedChargeMw))) ? "default" : "pointer" }}>
-                        {phase !== "BM" ? "AWAITING BM PHASE..." : submitted ? "✓ BM BID SUBMITTED" : (isShort ? "OFFER RESERVE & DISCHARGE →" : "BID TO ABSORB & CHARGE →")}
+                    <button data-testid="bess-submit-bm" onClick={onSubmit} disabled={submitted || !isBm || !myBid.price || (myBid.mw > (isShort ? (contractPosition ? Math.min(def.maxMW, sustainedDischargeMw + (contractPosition > 0 ? (def.maxMWh - maxDischargeMwh) / (def.eff || 1) / 0.5 : 0)) : sustainedDischargeMw) : (contractPosition ? Math.min(def.maxMW, sustainedChargeMw + (contractPosition < 0 ? maxDischargeMwh * (def.eff || 1) / 0.5 : 0)) : sustainedChargeMw)))} style={{ marginTop: 16, width: "100%", padding: "12px", background: submitted || !isBm || (myBid.mw > (isShort ? (contractPosition ? Math.min(def.maxMW, sustainedDischargeMw + (contractPosition > 0 ? (def.maxMWh - maxDischargeMwh) / (def.eff || 1) / 0.5 : 0)) : sustainedDischargeMw) : (contractPosition ? Math.min(def.maxMW, sustainedChargeMw + (contractPosition < 0 ? maxDischargeMwh * (def.eff || 1) / 0.5 : 0)) : sustainedChargeMw))) ? "#1a3045" : (isShort ? "#38c0fc" : "#1de98b"), border: "none", borderRadius: 6, color: submitted || !isBm || (myBid.mw > (isShort ? (contractPosition ? Math.min(def.maxMW, sustainedDischargeMw + (contractPosition > 0 ? (def.maxMWh - maxDischargeMwh) / (def.eff || 1) / 0.5 : 0)) : sustainedDischargeMw) : (contractPosition ? Math.min(def.maxMW, sustainedChargeMw + (contractPosition < 0 ? maxDischargeMwh * (def.eff || 1) / 0.5 : 0)) : sustainedChargeMw))) ? "#4d7a96" : "#050e16", fontWeight: 800, fontSize: 12, cursor: submitted || !isBm || (myBid.mw > (isShort ? (contractPosition ? Math.min(def.maxMW, sustainedDischargeMw + (contractPosition > 0 ? (def.maxMWh - maxDischargeMwh) / (def.eff || 1) / 0.5 : 0)) : sustainedDischargeMw) : (contractPosition ? Math.min(def.maxMW, sustainedChargeMw + (contractPosition < 0 ? maxDischargeMwh * (def.eff || 1) / 0.5 : 0)) : sustainedChargeMw))) ? "default" : "pointer" }}>
+                        {!isBm ? "AWAITING BM PHASE..." : submitted ? "✓ BM BID SUBMITTED" : (isShort ? "OFFER RESERVE & DISCHARGE →" : "BID TO ABSORB & CHARGE →")}
                     </button>
                 </>
             )}
