@@ -19,6 +19,76 @@ const TS = ({ label, val, vc, tip }) => {
 const f0 = p => Number(p).toLocaleString(undefined, { maximumFractionDigits: 0 });
 const fpp = v => (v >= 0 ? "+" : "") + "£" + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
 
+const NEXT_PHASE = {
+    FORECAST: "DA",
+    DA: "IDA1",
+    IDA1: "IDA2",
+    IDA2: "ID",
+    ID: "REALTIME",
+    REALTIME: "BM_OPEN",
+    BM_OPEN: "BM_CLOSE",
+    BM_CLOSE: "BM_OPEN / RESULTS",
+    RESULTS: "FORECAST",
+    BM: "BM_CLOSE",
+    SETTLED: "RESULTS",
+};
+
+function roleChecklist(roleName, phase) {
+    const role = String(roleName || "").toUpperCase();
+    const isAuction = ["DA", "IDA1", "IDA2"].includes(phase);
+    const isId = phase === "ID";
+    const isBm = ["REALTIME", "BM", "BM_OPEN", "BM_CLOSE"].includes(phase);
+    const isResults = ["RESULTS", "SETTLED"].includes(phase);
+
+    if (phase === "FORECAST") {
+        return ["Validate forecast shape", "Check likely stress SPs", "Prepare baseline strategy"];
+    }
+    if (isResults) {
+        return ["Review settlement deltas", "Audit imbalance cashflows", "Adjust next-day approach"];
+    }
+
+    if (role === "NESO") {
+        if (isBm) return ["Monitor INIV vs final NIV", "Dispatch merit order economically", "Protect frequency and reserve"];
+        if (isId) return ["Watch liquidity conditions", "Track emerging system direction", "Prepare BM dispatch plan"];
+        return ["Publish credible forecasts", "Flag volatile SPs", "Set system context for market"];
+    }
+
+    if (role === "ELEXON") {
+        if (isBm) return ["Track accepted BM actions", "Verify imbalance price inputs", "Prepare settlement audit trail"];
+        if (isId) return ["Monitor position evolution", "Track contract completeness", "Flag data quality issues"];
+        return ["Validate submission completeness", "Monitor contract formation", "Prepare reconciliation checks"];
+    }
+
+    if (role === "SUPPLIER") {
+        if (isBm) return ["Manage residual load exposure", "Minimize imbalance penalties", "Adjust demand-side actions"];
+        if (isId) return ["Re-hedge open exposure", "Optimize volume-price tradeoff", "Protect against forecast error"];
+        return ["Build hedge stack", "Control procurement cost", "Set target hedge ratio"];
+    }
+
+    if (role === "TRADER") {
+        if (isBm) return ["Read final system direction", "Exploit dispatch opportunities", "Control downside risk"];
+        if (isId) return ["Work the order book", "Manage queue/price priority", "Rebalance SP-level position"];
+        return ["Map auction opportunities", "Set execution thresholds", "Plan intraday pivot levels"];
+    }
+
+    if (role === "BESS") {
+        if (isBm) return ["Deploy SoC efficiently", "Price both directions rationally", "Preserve later optionality"];
+        if (isId) return ["Shape SP position early", "Avoid forced BM exposure", "Protect cycle economics"];
+        return ["Plan SoC trajectory", "Choose cycle budget", "Set cost floor by degradation"];
+    }
+
+    if (role === "DSR") {
+        if (isBm) return ["Curtail only when valuable", "Track rebound obligations", "Avoid compliance breaches"];
+        if (isId) return ["Prepare flexibility windows", "Estimate rebound impact", "Choose curtailment trigger points"];
+        return ["Map flexible demand blocks", "Set curtailment constraints", "Coordinate rebound strategy"];
+    }
+
+    if (isBm) return ["Respect physical constraints", "Bid to marginal cost logic", "Minimize imbalance deviation"];
+    if (isId) return ["Adjust contracted position", "Improve expected P&L", "Preserve BM optionality"];
+    if (isAuction) return ["Submit disciplined offers", "Avoid over-commitment risk", "Anchor around fundamentals"];
+    return ["Track market state", "Check exposure", "Prepare next action"];
+}
+
 export { Tip, TS, f0, fpp };
 
 export default function SharedLayout({
@@ -57,16 +127,43 @@ export default function SharedLayout({
     const tPct = (msLeft / ts) * 100;
     const tCol = msLeft < (ts * 0.27) ? "#f0455a" : msLeft < (ts * 0.53) ? "#f5b222" : "#1de98b";
 
-    // Market state safe fallback
-    const currentMkt = market?.actual || market?.forecast || { niv: 0, sbp: 50, ssp: 50, freq: 50 };
+    // Market state: forecast for pre-realtime phases, actual for realtime/bm/results.
+    const isPreRealtimePhase = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase);
+    const currentMkt = isPreRealtimePhase
+        ? (market?.forecast || market?.actual || { niv: 0, sbp: 50, ssp: 50, freq: 50 })
+        : (market?.actual || market?.forecast || { niv: 0, sbp: 50, ssp: 50, freq: 50 });
     const { niv, freq, sbp, ssp, isShort } = currentMkt;
     const totalPL = (cash || 0) + (daCash || 0);
     const playerCount = leaderboard?.filter(p => p.role !== "instructor")?.length || 0;
+    const nextPhase = NEXT_PHASE[phase] || "—";
+    const gateOpen = ["REALTIME", "BM", "BM_OPEN"].includes(phase) && msLeft > 0;
+    const gateLabel = ["REALTIME", "BM", "BM_OPEN", "BM_CLOSE"].includes(phase)
+        ? (gateOpen ? "OPEN" : "CLOSED")
+        : "N/A";
+    const gateCol = gateLabel === "OPEN" ? "#1de98b" : gateLabel === "CLOSED" ? "#f0455a" : "#4d7a96";
+    const iniv = market?.forecast?.indicativeNiv;
+    const liveNiv = market?.actual?.niv;
+    const checklist = roleChecklist(roleName, phase);
 
     // Phase colour + accessible text label (used by automated tests)
-    const pCol = phase === "DA" ? "#f5b222" : phase === "ID" ? "#38c0fc" : phase === "BM" ? "#1de98b" : "#b78bfa";
-    const phaseText = phase === "DA" ? "DAY-AHEAD" : phase === "ID" ? "INTRADAY" : phase === "BM" ? "BALANCING" : "SETTLED";
-    const pLbl = phase === "DA" ? "📋 DAY-AHEAD" : phase === "ID" ? "🤝 INTRADAY" : phase === "BM" ? "⚡ BALANCING" : "🏁 SETTLEMENT";
+    const PHASE_STYLES = {
+        FORECAST:  { col: "#a78bfa", text: "FORECAST",       lbl: "🔮 FORECAST" },
+        DA:        { col: "#f5b222", text: "DAY-AHEAD",      lbl: "📋 DAY-AHEAD" },
+        IDA1:      { col: "#fb923c", text: "INTRADAY AUC 1", lbl: "🔄 IDA1" },
+        IDA2:      { col: "#f97316", text: "INTRADAY AUC 2", lbl: "🔄 IDA2" },
+        ID:        { col: "#38c0fc", text: "INTRADAY",       lbl: "🤝 INTRADAY" },
+        REALTIME:  { col: "#1de98b", text: "REALTIME",       lbl: "⚡ REALTIME" },
+        BM_OPEN:   { col: "#1de98b", text: "BM OPEN",        lbl: "⚡ BM OPEN" },
+        BM_CLOSE:  { col: "#22d3ee", text: "BM SETTLING",    lbl: "⚡ BM CLOSE" },
+        RESULTS:   { col: "#b78bfa", text: "RESULTS",        lbl: "🏁 RESULTS" },
+        // Legacy compat
+        BM:        { col: "#1de98b", text: "BALANCING",      lbl: "⚡ BALANCING" },
+        SETTLED:   { col: "#b78bfa", text: "SETTLED",        lbl: "🏁 SETTLEMENT" },
+    };
+    const ps = PHASE_STYLES[phase] || PHASE_STYLES.FORECAST;
+    const pCol = ps.col;
+    const phaseText = ps.text;
+    const pLbl = ps.lbl;
 
     return (
         <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: "#050e16", overflow: "hidden", color: "#ddeeff", fontFamily: "'Outfit', system-ui, sans-serif" }}>
@@ -202,6 +299,29 @@ export default function SharedLayout({
                     {topRight}
                 </div>
             </header>
+
+            {/* ─── OPERATOR STRIP: NOW / NEXT / GATE / PLAYBOOK ─── */}
+            <div style={{ borderBottom: "1px solid #1a3045", background: "#06111b", padding: "6px 10px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flexShrink: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ padding: "3px 7px", borderRadius: 5, border: `1px solid ${pCol}55`, background: `${pCol}1a`, fontSize: 9, color: pCol, fontWeight: 800 }}>NOW: {phaseText}</div>
+                    <div style={{ padding: "3px 7px", borderRadius: 5, border: "1px solid #2a5570", background: "#0c1c2a", fontSize: 9, color: "#9bc2dd", fontWeight: 700 }}>NEXT: {nextPhase}</div>
+                    <div style={{ padding: "3px 7px", borderRadius: 5, border: `1px solid ${gateCol}55`, background: `${gateCol}1a`, fontSize: 9, color: gateCol, fontWeight: 800 }}>GATE: {gateLabel}</div>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
+                    <div style={{ padding: "3px 7px", borderRadius: 5, border: "1px solid #234159", background: "#0c1c2a", fontSize: 9, color: "#4d7a96" }}>
+                        INIV <span style={{ color: "#38c0fc", fontWeight: 800 }}>{iniv === undefined ? "—" : `${f0(iniv)} MW`}</span>
+                    </div>
+                    <div style={{ padding: "3px 7px", borderRadius: 5, border: "1px solid #234159", background: "#0c1c2a", fontSize: 9, color: "#4d7a96" }}>
+                        LIVE NIV <span style={{ color: "#ddeeff", fontWeight: 800 }}>{liveNiv === undefined ? "—" : `${f0(liveNiv)} MW`}</span>
+                    </div>
+                </div>
+
+                <div style={{ width: "100%", display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 8, color: "#4d7a96", letterSpacing: 0.6, fontWeight: 800 }}>ROLE PLAYBOOK</span>
+                    <span style={{ fontSize: 9, color: "#ddeeff" }}>• {checklist[0]} • {checklist[1]} • {checklist[2]}</span>
+                </div>
+            </div>
 
             {/* ─── MAIN GRID ─── */}
             <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
