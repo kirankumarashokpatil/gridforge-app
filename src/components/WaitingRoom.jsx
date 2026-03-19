@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import { ROLES, GAME_MODES, SCENARIOS, ASSETS, ROOM_STATES } from "../shared/constants.js";
-import { roomKey, uid } from "../shared/utils.js";
 
 const ROLE_NEEDS_ASSET = (roleId) => {
     const r = ROLES[roleId];
@@ -17,76 +16,58 @@ const roleAssetOptions = (roleId) => {
 
 /* ─── WAITING ROOM ─── */
 export default function WaitingRoom({
-    gun, room, name, pid, setPid, role, setRole, setScreen,
-    isHost, setIsHost, gameMode, setGameMode, scenarioId, setScenarioId, players, roomState
+    api, room, name, pid, role, setRole, setScreen,
+    isHost, setIsHost, gameMode, setGameMode, scenarioId, setScenarioId, players, roomState, connect
 }) {
     const [copied, setCopied] = useState(false);
     const joinedRef = useRef(false);
 
+    // Connect to WebSocket on mount
     useEffect(() => {
-        if (!gun || !room || joinedRef.current) return;
+        if (!room || joinedRef.current) return;
         joinedRef.current = true;
-
-        const id = pid || uid();
-        if (!pid) setPid(id);
-
-        const playersNode = gun.get(roomKey(room, "players"));
-        const hostNode = gun.get(roomKey(room, "host"));
-        const myTimestamp = Date.now();
-
-        // Continuous watcher — self-corrects isHost if Gun syncs a different winner
-        hostNode.on((data) => {
-            if (data?.pid) setIsHost(data.pid === id);
-        });
-
-        hostNode.once((data) => {
-            const currentHost = data?.pid;
-            if (currentHost === id) {
-                setIsHost(true);
-            } else if (currentHost) {
-                setIsHost(false);
-            } else {
-                // No host in local cache yet. Wait 1200ms for relay to sync
-                // before claiming, so the first joiner's record has time to arrive.
-                setTimeout(() => {
-                    hostNode.once((latest) => {
-                        if (!latest?.pid) {
-                            // Use a transaction to ensure only one host
-                            const hostClaim = { pid: id, ts: myTimestamp };
-                            hostNode.put(hostClaim, (ack) => {
-                                // Verify we're still the host after the put
-                                hostNode.once((current) => {
-                                    setIsHost(current?.pid === id);
-                                });
-                            });
-                        }
-                        // If latest has a pid, the on() watcher already handled it
-                    });
-                }, 1200);
-            }
-        });
-
-        playersNode.get(id).once((existing) => {
-            console.log('[WaitingRoom] Creating/updating player:', { id, name, existing });
-            playersNode.get(id).put({
+        
+        // Connect WebSocket for real-time updates
+        connect(room);
+        
+        // Register player via API - server determines if we're the first (host)
+        if (api && pid) {
+            api.putPlayer(room, pid, {
                 name: (name || "").trim(),
-                preferredRole: existing?.preferredRole || null,
-                preferredAssetKey: existing?.preferredAssetKey || null,
+                preferredRole: null,
+                preferredAssetKey: null,
                 lastSeen: Date.now(),
+            }).then(() => {
+                console.log('[WaitingRoom] Player registered:', { pid, name });
+            }).catch(err => {
+                console.error('[WaitingRoom] Failed to register player:', err);
             });
-        });
+        }
+    }, [api, room, pid, name, connect]);
 
-        return () => { };
-    }, [gun, room]);
-
+    // Keep-alive heartbeat
     useEffect(() => {
-        if (!gun || !room || !pid) return;
+        if (!api || !room || !pid) return;
         const interval = setInterval(() => {
-            gun.get(roomKey(room, "players")).get(pid).put({ lastSeen: Date.now() });
+            api.putPlayer(room, pid, { lastSeen: Date.now() });
         }, 5000);
         return () => clearInterval(interval);
-    }, [gun, room, pid]);
+    }, [api, room, pid]);
 
+    // Detect if this player is the first player (host)
+    useEffect(() => {
+        if (!pid || !players || isHost) return;
+        
+        const playerEntries = Object.entries(players);
+        const otherPlayers = playerEntries.filter(([id, p]) => id !== pid && p.name);
+        const me = players[pid];
+        
+        // If I'm the only player with a name, I'm the host
+        if (me && me.name && otherPlayers.length === 0) {
+            console.log('[WaitingRoom] Detected as first player - setting as host');
+            setIsHost(true);
+        }
+    }, [players, pid, isHost, setIsHost]);
     useEffect(() => {
         const dbRole = players[pid]?.role;
         if (dbRole && dbRole !== role) {
@@ -94,21 +75,18 @@ export default function WaitingRoom({
         }
     }, [players, pid, role, setRole]);
 
+    // When confirmed as host, set NESO role
     useEffect(() => {
-        if (!gun || !room || !pid || !isHost) return;
+        if (!api || !room || !pid || !isHost) return;
         setRole("NESO");
-        // Get existing player data first, then update with NESO role while preserving other fields
-        gun.get(roomKey(room, "players")).get(pid).once((existing) => {
-            gun.get(roomKey(room, "players")).get(pid).put({
-                ...existing, // Preserve existing data like name, lastSeen, etc.
-                role: "NESO",
-                preferredRole: "NESO",
-                status: "ASSIGNED",
-                ready: true,
-                lastSeen: Date.now(), // Update lastSeen
-            });
+        api.putPlayer(room, pid, {
+            role: "NESO",
+            preferredRole: "NESO",
+            status: "ASSIGNED",
+            ready: true,
+            lastSeen: Date.now(),
         });
-    }, [gun, room, pid, isHost, setRole]);
+    }, [api, room, pid, isHost, setRole]);
 
     const copyRoom = () => {
         navigator.clipboard?.writeText(room);
@@ -117,19 +95,19 @@ export default function WaitingRoom({
     };
 
     const toggleReady = () => {
-        if (!gun || !room || !pid) return;
+        if (!api || !room || !pid) return;
         const me = players[pid];
         const newReady = !me?.ready;
-        gun.get(roomKey(room, "players")).get(pid).put({ 
+        api.putPlayer(room, pid, { 
             ready: newReady,
             status: newReady ? "READY" : "ASSIGNED"
         });
     };
 
     const handleStart = () => {
-        if (!gun || !room || !isHost || !canStart) return;
+        if (!api || !room || !isHost || !canStart) return;
         const now = Date.now();
-        gun.get(roomKey(room, "meta")).put({
+        api.updateRoom(room, {
             roomState: ROOM_STATES.RUNNING,
             sp: 1,
             phase: "DA",
@@ -359,7 +337,7 @@ export default function WaitingRoom({
                                 {assignableRoleOptions.map(r => (
                                     <button data-testid={`role-${r.id}`} key={r.id} onClick={() => {
                                         console.log('[WaitingRoom] Role button clicked:', r.id);
-                                        if (gun && room && pid) gun.get(roomKey(room, "players")).get(pid).put({ preferredRole: r.id });
+                                        if (api && room && pid) api.putPlayer(room, pid, { preferredRole: r.id });
                                     }} style={{
                                         background: myPreferredRole === r.id ? "#38c0fc18" : "#0c1c2a",
                                         border: `1px solid ${myPreferredRole === r.id ? "#38c0fc" : "#38c0fc22"}`,
@@ -378,7 +356,7 @@ export default function WaitingRoom({
                                     <select
                                         value={myPreferredAssetKey}
                                         onChange={(e) => {
-                                            if (gun && room && pid) gun.get(roomKey(room, "players")).get(pid).put({ preferredAssetKey: e.target.value || null });
+                                            if (api && room && pid) api.putPlayer(room, pid, { preferredAssetKey: e.target.value || null });
                                         }}
                                         style={{ 
                                             width: "100%", 
@@ -500,13 +478,13 @@ export default function WaitingRoom({
                                                     disabled={p.id === pid}
                                                     onChange={(e) => {
                                                         const newRole = e.target.value;
-                                                        if (gun && room) {
+                                                        if (api && room) {
                                                             const isHostChange = p.id === pid;
-                                                            gun.get(roomKey(room, "players")).get(p.id).put({
+                                                            api.putPlayer(room, p.id, {
                                                                 role: newRole,
                                                                 status: newRole === "UNASSIGNED" ? "JOINED" : "ASSIGNED",
                                                                 assignedAssetKey: ROLE_NEEDS_ASSET(newRole) ? (p.assignedAssetKey || p.preferredAssetKey || null) : null,
-                                                                ready: isHostChange ? true : false, // Preserve host ready, reset others
+                                                                ready: isHostChange ? true : false,
                                                             });
                                                         }
                                                     }}
@@ -533,12 +511,12 @@ export default function WaitingRoom({
                                                         data-testid="asset-assign-select"
                                                         value={p.assignedAssetKey || ""}
                                                         onChange={(e) => {
-                                                            if (gun && room) {
+                                                            if (api && room) {
                                                                 const isHostChange = p.id === pid;
-                                                                gun.get(roomKey(room, "players")).get(p.id).put({ 
+                                                                api.putPlayer(room, p.id, { 
                                                                     assignedAssetKey: e.target.value || null, 
                                                                     status: e.target.value ? "ASSIGNED" : "JOINED",
-                                                                    ready: isHostChange ? true : false, // Preserve host ready
+                                                                    ready: isHostChange ? true : false,
                                                                 });
                                                             }
                                                         }}

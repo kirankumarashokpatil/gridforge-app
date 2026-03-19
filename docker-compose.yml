@@ -40,7 +40,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # GridForge Frontend (Vite)
+  # GridForge Frontend (Vite + nginx)
   app:
     build:
       context: .
@@ -48,7 +48,8 @@ services:
       target: runner
     container_name: gridforge-app
     environment:
-      VITE_API_URL: http://api:8000
+      # VITE_API_URL is used at build time, not runtime for static files
+      # Frontend will use relative URLs to reach API via nginx proxy or direct
       NODE_ENV: production
     ports:
       - "3000:80"

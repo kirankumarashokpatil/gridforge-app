@@ -1318,7 +1318,7 @@ export default function App() {
   const allBids = [...Object.values(orderBook).filter(b => b && b.mw), ...(market?.actual?.bots || [])];
   const sc = SCENARIOS[roomScenario] || SCENARIOS.NORMAL;
 
-  if (screen === "lobby") return <LobbyScreen name={name} setName={setName} room={room} setRoom={setRoom} gunReady={ready} onNext={() => {
+  if (screen === "lobby") return <LobbyScreen name={name} setName={setName} room={room} setRoom={setRoom} apiReady={ready} onNext={() => {
     // When joining from Lobby, go to Waiting Room and generate stable PID
         if (!pid) {
           const id = getOrCreatePlayerId();
@@ -1327,7 +1327,7 @@ export default function App() {
         }
     setScreen("waiting_room");
   }} />;
-  if (screen === "waiting_room") return <WaitingRoom gunReady={ready} room={room} name={name} pid={pid} setPid={setPid} role={role} setRole={setRole} setScreen={setScreen} isHost={isInstructor} setIsHost={setIsInstructor} gameMode={gameMode} setGameMode={setGameMode} scenarioId={scenarioId} setScenarioId={setScenarioId} players={players} />;
+  if (screen === "waiting_room") return <WaitingRoom api={api} connect={connect} room={room} name={name} pid={pid} role={role} setRole={setRole} setScreen={setScreen} isHost={isInstructor} setIsHost={setIsInstructor} gameMode={gameMode} setGameMode={setGameMode} scenarioId={scenarioId} setScenarioId={setScenarioId} players={players} />;
   if (screen === "asset") return <AssetScreen onSelect={handleJoin} playerName={name} room={room} scenario={sc} role={role} />;
   if (screen === "game_no_asset") return (
     <div style={{ background: "#050e16", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", color: "#38c0fc" }}>
@@ -1421,7 +1421,7 @@ export default function App() {
 }
 
 /* ─── PREMIUM LOBBY / LANDING PAGE ─── */
-function LobbyScreen({ name, setName, room, setRoom, gunReady, onNext }) {
+function LobbyScreen({ name, setName, room, setRoom, apiReady, onNext }) {
   const canProceed = name.trim().length > 0 && room.trim().length >= 3;
   const randomRoom = () => setRoom(Math.random().toString(36).slice(2, 7).toUpperCase());
 
@@ -1466,7 +1466,7 @@ function LobbyScreen({ name, setName, room, setRoom, gunReady, onNext }) {
       <div style={{ flex: "0 0 450px", background: "#061019", borderLeft: "1px solid #162c3d", display: "flex", flexDirection: "column", justifyContent: "center", padding: "48px", position: "relative", zIndex: 10, boxShadow: "-10px 0 40px #000000" }}>
 
         <div style={{ marginBottom: 40 }}>
-          <ConnectivityIndicator ready={gunReady} />
+          <ConnectivityIndicator ready={apiReady} />
         </div>
 
         <h2 style={{ margin: "0 0 32px 0", color: "#ffffff", fontSize: 28, fontWeight: 800 }}>Join Session</h2>

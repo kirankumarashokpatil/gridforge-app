@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || '';
+const API_BASE = 'http://localhost:8000';
 
 // Simple fetch wrapper
 async function api(method, endpoint, body = null) {
@@ -27,7 +27,7 @@ export function useApi() {
     if (!room || wsRef.current?.readyState === WebSocket.OPEN) return;
     
     roomRef.current = room;
-    const ws = new WebSocket(`ws://${window.location.host}/ws?room=${room}`);
+    const ws = new WebSocket(`ws://localhost:8000/ws?room=${room}`);
     
     ws.onopen = () => {
       console.log('[WebSocket] Connected to room:', room);
