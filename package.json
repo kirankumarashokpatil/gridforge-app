@@ -9,8 +9,6 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest",
-    "start": "node server-api.cjs",
-    "start:old": "node server.cjs",
     "bots": "node bot_players.js",
     "relay": "node gun-relay.cjs",
     "test:e2e": "node test/e2e/gridforge-comprehensive.test.cjs",
@@ -18,7 +16,6 @@
     "test:e2e:waitingroom": "node test/e2e/waiting-room-flow.test.cjs"
   },
   "dependencies": {
-    "express": "^4.22.1",
     "gun": "^0.2020.1241",
     "leaflet": "^1.9.4",
     "leaflet-ant-path": "^1.3.0",

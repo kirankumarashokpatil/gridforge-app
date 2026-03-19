@@ -380,6 +380,9 @@ export default function GeneratorScreen(props) {
     const expectedImbMw = (pState.currentMw || 0) - (contractPosition || 0);
     const expectedCost = expectedImbMw !== 0 ? expectedImbMw * (expectedImbMw > 0 ? ssp : sbp) : 0;
 
+    const expectedImbMaxMw = (maxReachableMw || 0) - (contractPosition || 0);
+    const expectedCostMaxMw = expectedImbMaxMw !== 0 ? expectedImbMaxMw * (expectedImbMaxMw > 0 ? ssp : sbp) : 0;
+
     // Energy flow summary for this SP (physical layer)
     const actualMw = pState.currentMw || 0;
     const actualMwh = actualMw * SP_DURATION_H;
@@ -429,6 +432,20 @@ export default function GeneratorScreen(props) {
                                 {expectedCost > 0 ? "+" : "−"}£{f0(Math.abs(expectedCost))} (Estimated Cost)
                             </div>
                         )}
+
+                        <div style={{ marginTop: 10, padding: "10px", borderRadius: 6, background: "#061b2b", border: "1px solid #1a3045" }}>
+                            <div style={{ fontSize: 9, color: "#4d7a96", marginBottom: 6 }}>IF OUTPUT = MAX AVAILABLE ({f0(maxReachableMw)} MW)</div>
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#ddeeff" }}>
+                                <span>Imbalance</span>
+                                <span style={{ color: expectedImbMaxMw === 0 ? "#1de98b" : (expectedImbMaxMw > 0 ? "#3b82f6" : "#f0455a"), fontWeight: 700 }}>{expectedImbMaxMw > 0 ? "+" : ""}{f0(expectedImbMaxMw)} MW</span>
+                            </div>
+                            {expectedImbMaxMw !== 0 && (
+                                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 11, color: expectedCostMaxMw >= 0 ? "#1de98b" : "#f0455a", fontWeight: 700 }}>
+                                    <span>Cost</span>
+                                    <span>{expectedCostMaxMw > 0 ? "+" : "−"}£{f0(Math.abs(expectedCostMaxMw))}</span>
+                                </div>
+                            )}
+                        </div>
                     </div>
                 </Tip>
 
@@ -453,6 +470,52 @@ export default function GeneratorScreen(props) {
                     </div>
                 </div>
             </div>
+
+            {spHistory.length > 0 && (() => {
+                const last = spHistory[0];
+                const contractMw = last.contractPosMw ?? contractPosition;
+                const actualMw = last.actualPhysical ?? pState.currentMw;
+                const deviation = actualMw - contractMw;
+                const deviationLabel = deviation === 0 ? "Balanced" : deviation > 0 ? `Over-delivered +${f0(deviation)} MW` : `Under-delivered ${f0(Math.abs(deviation))} MW`;
+
+                return (
+                    <div style={{ marginTop: 20, padding: 12, background: "#071926", border: "1px solid #1a3045", borderRadius: 8 }}>
+                        <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, marginBottom: 8 }}>POST-SP REVIEW</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 10, color: "#ddeeff" }}>
+                            <div style={{ background: "#0c1c2a", border: "1px solid #1a3045", borderRadius: 4, padding: 10 }}>
+                                <div style={{ fontSize: 9, color: "#4d7a96", marginBottom: 4 }}>CONTRACT VS DELIVERY</div>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700 }}>
+                                    <span>Contract</span>
+                                    <span>{f0(contractMw)} MW</span>
+                                </div>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, marginTop: 4 }}>
+                                    <span>Delivered</span>
+                                    <span>{f0(actualMw)} MW</span>
+                                </div>
+                                <div style={{ marginTop: 8, fontSize: 9, color: deviation === 0 ? "#1de98b" : "#f5b222" }}>{deviationLabel}</div>
+                            </div>
+
+                            <div style={{ background: "#0c1c2a", border: "1px solid #1a3045", borderRadius: 4, padding: 10 }}>
+                                <div style={{ fontSize: 9, color: "#4d7a96", marginBottom: 4 }}>SETTLEMENT</div>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700 }}>
+                                    <span>Imbalance</span>
+                                    <span style={{ color: (last.imbPen || 0) >= 0 ? "#1de98b" : "#f0455a" }}>£{f0(last.imbPen || 0)}</span>
+                                </div>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, marginTop: 4 }}>
+                                    <span>Imbalance price</span>
+                                    <span>£{f0(last.imbPrc || 0)}</span>
+                                </div>
+                                <div style={{ marginTop: 8, fontSize: 9, color: last.accepted ? "#1de98b" : "#94a3b8" }}>
+                                    BM action accepted: {last.accepted ? "Yes" : "No"}
+                                </div>
+                                <div style={{ marginTop: 4, fontSize: 9, color: "#4d7a96" }}>
+                                    BM volume: {last.mw !== undefined ? `${f0(last.mw)} MW` : "—"}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
 
             <div ref={revenueRef} style={{ background: "#08141f", border: "1px solid #1a3045", borderRadius: 8, padding: 12 }}>
                 <div style={{ fontSize: 9, color: "#4d7a96", fontWeight: 700, textTransform: "uppercase", marginBottom: 12 }}>REVENUE BREAKDOWN</div>

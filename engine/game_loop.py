@@ -550,7 +550,13 @@ def _settle_sp(rs: dict, sp: int) -> dict:
                 else deviation * actual["sbp"] * SP_DURATION_H * forgive_mult
             )
 
-        ps["cash"] = ps.get("cash", 0) + imb_pen
+        # Operating cost (fuel/wear)
+        asset_def = ASSETS.get(asset_key, {})
+        var_cost = asset_def.get("varCost", 0) or asset_def.get("wear", 0)
+        operating_cost = -(abs(actual_physical) * var_cost * SP_DURATION_H)
+
+        sp_cash_delta = imb_pen + operating_cost
+        ps["cash"] = ps.get("cash", 0) + sp_cash_delta
         if imb_pen < -5:
             ps["imbalancePenalty"] = ps.get("imbalancePenalty", 0) + abs(imb_pen)
 
@@ -584,7 +590,7 @@ def _settle_sp(rs: dict, sp: int) -> dict:
 
         sp_record = {
             "sp": sp,
-            "revenue": bm_rev + da_rev + ida1_rev + ida2_rev + imb_pen,
+            "revenue": bm_rev + da_rev + ida1_rev + ida2_rev + imb_pen + operating_cost,
             "bmRev": bm_rev,
             "daRev": da_rev,
             "ida1Rev": ida1_rev,
@@ -605,12 +611,31 @@ def _settle_sp(rs: dict, sp: int) -> dict:
         settlements[pid] = {
             "deviation": deviation,
             "imbalancePenalty": imb_pen,
+            "operatingCost": operating_cost,
+            "cashDelta": sp_cash_delta,
             "cash": ps["cash"],
             "contractPosMw": contract_pos_mw,
             "bmAccMw": bm_acc_mw,
             "actualPhysical": actual_physical,
             "physicalStatus": ps.get("physicalStatus", "ONLINE"),
         }
+
+    # BSUoS socialization: spread total imbalance cost across all players
+    total_imb_cost = sum(
+        abs(s.get("imbalancePenalty", 0))
+        for s in settlements.values()
+        if s.get("imbalancePenalty", 0) < 0
+    )
+    num_players = len(settlements) or 1
+    bsuos_per_player = -(total_imb_cost / num_players) if total_imb_cost > 0 else 0
+
+    for pid, sdata in settlements.items():
+        ps = rs["playerStates"].get(pid)
+        if ps and bsuos_per_player != 0:
+            ps["cash"] = ps.get("cash", 0) + bsuos_per_player
+            sdata["cashDelta"] = sdata.get("cashDelta", 0) + bsuos_per_player
+            sdata["cash"] = ps["cash"]
+        sdata["bsuosCharge"] = bsuos_per_player
 
     return settlements
 

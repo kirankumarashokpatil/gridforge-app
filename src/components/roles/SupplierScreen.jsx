@@ -453,6 +453,50 @@ export default function SupplierScreen(props) {
                 </div>
                 <div style={{ fontSize: 8, color: "#2a5570", marginTop: 4 }}>= Retail Revenue – Wholesale Cost – Imbalance</div>
             </div>
+
+            {spHistory && spHistory.length > 0 && (() => {
+                const last = spHistory[0];
+                const demandError = actualDemandMw - baseDemandMw;
+                const demandErrorLabel = demandError === 0 ? "On target" : demandError > 0 ? `Higher by ${f0(demandError)} MW` : `Lower by ${f0(Math.abs(demandError))} MW`;
+
+                return (
+                    <div style={{ marginTop: 20, padding: 12, background: "#071926", border: "1px solid #1a3045", borderRadius: 8 }}>
+                        <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, marginBottom: 8 }}>POST-SP REVIEW</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 10, color: "#ddeeff" }}>
+                            <div style={{ background: "#0c1c2a", border: "1px solid #1a3045", borderRadius: 4, padding: 10 }}>
+                                <div style={{ fontSize: 9, color: "#4d7a96", marginBottom: 4 }}>DEMAND vs PURCHASE</div>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700 }}>
+                                    <span>Forecast demand</span>
+                                    <span>{f0(baseDemandMw)} MW</span>
+                                </div>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, marginTop: 4 }}>
+                                    <span>Actual demand</span>
+                                    <span>{f0(actualDemandMw)} MW</span>
+                                </div>
+                                <div style={{ marginTop: 8, fontSize: 9, color: demandError === 0 ? "#1de98b" : "#f5b222" }}>{demandErrorLabel}</div>
+                            </div>
+
+                            <div style={{ background: "#0c1c2a", border: "1px solid #1a3045", borderRadius: 4, padding: 10 }}>
+                                <div style={{ fontSize: 9, color: "#4d7a96", marginBottom: 4 }}>SETTLEMENT</div>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700 }}>
+                                    <span>Imbalance cost</span>
+                                    <span style={{ color: (last.imbPen || 0) >= 0 ? "#1de98b" : "#f0455a" }}>£{f0(last.imbPen || 0)}</span>
+                                </div>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, marginTop: 4 }}>
+                                    <span>Imbalance price</span>
+                                    <span>£{f0(last.imbPrc || 0)}</span>
+                                </div>
+                                <div style={{ marginTop: 8, fontSize: 9, color: last.accepted ? "#1de98b" : "#94a3b8" }}>
+                                    BM action accepted: {last.accepted ? "Yes" : "No"}
+                                </div>
+                                <div style={{ marginTop: 4, fontSize: 9, color: "#4d7a96" }}>
+                                    BM volume: {last.mw !== undefined ? `${f0(last.mw)} MW` : "—"}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
         </div>
     );
 

@@ -141,8 +141,30 @@ export default function SharedLayout({
         ? (gateOpen ? "OPEN" : "CLOSED")
         : "N/A";
     const gateCol = gateLabel === "OPEN" ? "#1de98b" : gateLabel === "CLOSED" ? "#f0455a" : "#4d7a96";
+
+    const gateSeconds = Math.max(0, Math.ceil(msLeft / 1000));
+    const gateTimer = gateOpen ? `Closes in ${gateSeconds}s` : `Opens in ${gateSeconds}s`;
+
+    const gateAction = (() => {
+        if (phase === "FORECAST") return "Prepare forecast & strategy";
+        if (phase === "DA") return "Submit/adjust day-ahead contracts";
+        if (phase === "IDA1" || phase === "IDA2") return "Submit intraday offers";
+        if (phase === "ID") return "Trade to close position";
+        if (phase === "REALTIME") return "Observe system, prepare BM response";
+        if (phase === "BM_OPEN") return "Bid/offer in BM";
+        if (phase === "BM_CLOSE") return "Await BM results";
+        if (phase === "RESULTS") return "Review settlement & performance";
+        return "Monitor market state";
+    })();
+
     const iniv = market?.forecast?.indicativeNiv;
-    const liveNiv = market?.actual?.niv;
+    const inSbp = market?.forecast?.sbp;
+    const inSsp = market?.forecast?.ssp;
+
+    const finalNiv = market?.actual?.niv;
+    const finalSbp = market?.actual?.sbp;
+    const finalSsp = market?.actual?.ssp;
+
     const checklist = roleChecklist(roleName, phase);
 
     // Phase colour + accessible text label (used by automated tests)
@@ -305,21 +327,41 @@ export default function SharedLayout({
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <div style={{ padding: "3px 7px", borderRadius: 5, border: `1px solid ${pCol}55`, background: `${pCol}1a`, fontSize: 9, color: pCol, fontWeight: 800 }}>NOW: {phaseText}</div>
                     <div style={{ padding: "3px 7px", borderRadius: 5, border: "1px solid #2a5570", background: "#0c1c2a", fontSize: 9, color: "#9bc2dd", fontWeight: 700 }}>NEXT: {nextPhase}</div>
-                    <div style={{ padding: "3px 7px", borderRadius: 5, border: `1px solid ${gateCol}55`, background: `${gateCol}1a`, fontSize: 9, color: gateCol, fontWeight: 800 }}>GATE: {gateLabel}</div>
+                    <div style={{ padding: "3px 7px", borderRadius: 5, border: `1px solid ${gateCol}55`, background: `${gateCol}1a`, fontSize: 9, color: gateCol, fontWeight: 800 }} title={`${gateAction} (${gateTimer})`}>GATE: {gateLabel} · {gateTimer}</div>
                 </div>
 
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
-                    <div style={{ padding: "3px 7px", borderRadius: 5, border: "1px solid #234159", background: "#0c1c2a", fontSize: 9, color: "#4d7a96" }}>
-                        INIV <span style={{ color: "#38c0fc", fontWeight: 800 }}>{iniv === undefined ? "—" : `${f0(iniv)} MW`}</span>
+                    <div style={{ padding: "3px 7px", borderRadius: 5, border: "1px solid #234159", background: "#0c1c2a", fontSize: 9, color: "#4d7a96", display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontWeight: 700, color: "#38c0fc" }}>INDICATIVE</span>
+                        <span style={{ fontWeight: 700, color: "#38c0fc" }}>NIV {iniv === undefined ? "—" : `${f0(iniv)} MW`}</span>
+                        <span style={{ fontWeight: 700, color: "#f5b222" }}>SBP {inSbp === undefined ? "—" : `£${f0(inSbp)}`}</span>
+                        <span style={{ fontWeight: 700, color: "#38c0fc" }}>SSP {inSsp === undefined ? "—" : `£${f0(inSsp)}`}</span>
                     </div>
-                    <div style={{ padding: "3px 7px", borderRadius: 5, border: "1px solid #234159", background: "#0c1c2a", fontSize: 9, color: "#4d7a96" }}>
-                        LIVE NIV <span style={{ color: "#ddeeff", fontWeight: 800 }}>{liveNiv === undefined ? "—" : `${f0(liveNiv)} MW`}</span>
+                    <div style={{ padding: "3px 7px", borderRadius: 5, border: "1px solid #234159", background: "#0c1c2a", fontSize: 9, color: "#4d7a96", display: "flex", alignItems: "center", gap: 6 }} title="Live / final values once BM closes">
+                        <span style={{ fontWeight: 700, color: "#ddeeff" }}>LIVE</span>
+                        <span style={{ fontWeight: 700, color: "#ddeeff" }}>NIV {finalNiv === undefined ? "—" : `${f0(finalNiv)} MW`}</span>
+                        <span style={{ fontWeight: 700, color: "#f0455a" }}>SBP {finalSbp === undefined ? "—" : `£${f0(finalSbp)}`}</span>
+                        <span style={{ fontWeight: 700, color: "#1de98b" }}>SSP {finalSsp === undefined ? "—" : `£${f0(finalSsp)}`}</span>
                     </div>
                 </div>
 
                 <div style={{ width: "100%", display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ fontSize: 8, color: "#4d7a96", letterSpacing: 0.6, fontWeight: 800 }}>ROLE PLAYBOOK</span>
                     <span style={{ fontSize: 9, color: "#ddeeff" }}>• {checklist[0]} • {checklist[1]} • {checklist[2]}</span>
+                </div>
+
+                <div style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 9 }}>
+                    <span style={{ fontWeight: 700, color: "#4d7a96" }}>CHECKLIST</span>
+                    {checklist.map((item, idx) => (
+                        <span key={idx} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 999, background: "#0c1c2a", border: "1px solid #1a3045", color: "#ddeeff" }}>
+                            <span style={{ color: "#1de98b" }}>•</span>
+                            <span style={{ fontSize: 9 }}>{item}</span>
+                        </span>
+                    ))}
+                </div>
+                <div style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, fontSize: 9, color: "#94a3b8" }}>
+                    <span style={{ fontWeight: 700, color: "#4d7a96" }}>ACTIONS</span>
+                    <span>{gateAction}</span>
                 </div>
             </div>
 

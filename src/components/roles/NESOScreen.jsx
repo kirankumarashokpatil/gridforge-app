@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import SharedLayout from './SharedLayout';
 import ForecastPanel from './ForecastPanel';
 import MarketOverviewPanel from '../shared/MarketOverviewPanel';
+import EventFeed from '../shared/EventFeed';
 import { EVENTS, SYSTEM_PARAMS, FREQ_FAIL_LO, FREQ_FAIL_HI } from '../../shared/constants';
 import { ComposableMap, Geographies, Geography, Marker, Line } from 'react-simple-maps';
 
@@ -684,6 +685,53 @@ export default function NESOScreen(props) {
                             )) : <div style={{ fontSize: 10, color: "#4d7a96", padding: 8 }}>No accepted</div>}
                         </div>
                     </div>
+
+                    {/* Post-SP Audit: Forecast error → Imbalance → BM actions → Settlement */}
+                    {spHistory.length > 0 && (() => {
+                        const last = spHistory[0];
+                        const forecastNiv = last.indicativeNiv;
+                        const actualNiv = last.niv;
+                        const nivError = typeof forecastNiv === "number" ? actualNiv - forecastNiv : undefined;
+                        const acceptedText = last.accepted ? "Yes" : "No";
+                        return (
+                            <div style={{ padding: "10px 12px", background: "#071926", border: "1px solid #1a3045", borderRadius: 6, marginTop: 8 }}>
+                                <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, marginBottom: 8 }}>POST-SP AUDIT</div>
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 10, color: "#ddeeff" }}>
+                                    <div style={{ background: "#0c1c2a", border: "1px solid #1a3045", borderRadius: 4, padding: "8px" }}>
+                                        <div style={{ fontSize: 9, color: "#4d7a96", marginBottom: 4 }}>Forecast <span style={{ color: "#38c0fc" }}>NIV</span></div>
+                                        <div style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700 }}>{forecastNiv !== undefined ? `${f0(forecastNiv)} MW` : "—"}</div>
+                                        <div style={{ fontSize: 9, color: "#4d7a96", marginTop: 6 }}>Actual NIV</div>
+                                        <div style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, color: actualNiv >= 0 ? "#f97316" : "#22d3ee" }}>{f0(actualNiv)} MW</div>
+                                        {nivError !== undefined && (
+                                            <div style={{ fontSize: 9, marginTop: 6, color: nivError === 0 ? "#1de98b" : "#f5b222" }}>
+                                                Error: {nivError >= 0 ? "+" : ""}{f0(nivError)} MW
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div style={{ background: "#0c1c2a", border: "1px solid #1a3045", borderRadius: 4, padding: "8px" }}>
+                                        <div style={{ fontSize: 9, color: "#4d7a96", marginBottom: 4 }}>Accepted BM action</div>
+                                        <div style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, color: last.accepted ? "#1de98b" : "#94a3b8" }}>{acceptedText}</div>
+                                        <div style={{ fontSize: 9, color: "#4d7a96", marginTop: 6 }}>Volume</div>
+                                        <div style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700 }}>{last.mw !== undefined ? `${f0(last.mw)} MW` : "—"}</div>
+                                        <div style={{ fontSize: 9, color: "#4d7a96", marginTop: 6 }}>Imbalance price</div>
+                                        <div style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700 }}>{last.imbPrc !== undefined ? `£${f0(last.imbPrc)}` : "—"}</div>
+                                    </div>
+                                </div>
+
+                                <div style={{ marginTop: 10, background: "#06111b", borderRadius: 4, border: "1px solid #1a3045", padding: "10px" }}>
+                                    <div style={{ fontSize: 9, color: "#64748b", marginBottom: 4 }}>Settlement Summary</div>
+                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 10 }}>
+                                        <div style={{ display: "flex", justifyContent: "space-between" }}><span>DA:</span><span>£{f0(last.daRev || 0)}</span></div>
+                                        <div style={{ display: "flex", justifyContent: "space-between" }}><span>ID:</span><span>£{f0(last.idRev || 0)}</span></div>
+                                        <div style={{ display: "flex", justifyContent: "space-between" }}><span>BM:</span><span>£{f0(last.bmRev || 0)}</span></div>
+                                        <div style={{ display: "flex", justifyContent: "space-between" }}><span>Imbalance:</span><span>£{f0(last.imbPen || 0)}</span></div>
+                                        <div style={{ display: "flex", justifyContent: "space-between" }}><span>Cost:</span><span>£{f0(last.operatingCost || 0)}</span></div>
+                                        <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, color: "#ddeeff" }}><span>Total</span><span>£{f0(last.revenue || 0)}</span></div>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })()}
                 </div>
 
                 {/* Reserve Margin — from real data */}
@@ -730,6 +778,9 @@ export default function NESOScreen(props) {
                     )) : <div style={{ fontSize: 10, color: "#4d7a96" }}>No players yet</div>}
                 </div>
             </div>
+
+            {/* Market Event Feed */}
+            <EventFeed spHistory={spHistory} maxItems={6} title="Market Notices" />
 
             {/* Events Injector */}
             <div style={s.panel}>

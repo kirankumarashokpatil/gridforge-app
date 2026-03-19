@@ -3,6 +3,7 @@ import SharedLayout from './SharedLayout';
 import { Tip } from '../shared/Tip';
 import { SYSTEM_PARAMS } from '../../shared/constants';
 import MarketOverviewPanel from '../shared/MarketOverviewPanel';
+import EventFeed from '../shared/EventFeed';
 import DACurveSubmission from '../DACurveSubmission';
 
 const f0 = p => Number(p).toLocaleString(undefined, { maximumFractionDigits: 0 });
@@ -186,6 +187,8 @@ export default function TraderScreen(props) {
                     ))}
                 </div>
             </Panel>
+
+            <EventFeed spHistory={spHistory} maxItems={5} title="Market Notices" />
         </div>
     );
 

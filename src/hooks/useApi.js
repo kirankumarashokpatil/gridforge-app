@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-const API_BASE = process.env.VITE_API_URL || '';
+const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || '';
 
 // Simple fetch wrapper
 async function api(method, endpoint, body = null) {
@@ -35,12 +35,50 @@ export function useApi() {
     
     ws.onmessage = (event) => {
       const message = JSON.parse(event.data);
-      const { type, data, sp, cycle } = message;
+      const { type, data, sp, cycle, player_id } = message;
 
       // Notify all registered listeners for matching keys.
-      // listenersRef shape: Map<key, Set<callback>>
+      // Subscription keys use format "room:ROOM:type" or "room:ROOM:type:qualifier"
+      // Server broadcasts use {type: "players"} or {type: "bm_bid", sp: 5}
+      // We match when the key's type segment matches the broadcast type,
+      // and any qualifier (SP/cycle) also matches.
       listenersRef.current.forEach((callbacks, key) => {
-        if (key === type || key === `${type}_${sp}` || key === `${type}_${cycle}`) {
+        const parts = key.split(':');
+        // Extract the type part and optional qualifier from the subscription key
+        // Format: "room:ROOMID:type" or "room:ROOMID:type:qualifier"
+        const keyType = parts.length >= 3 ? parts[2] : key;
+        const keyQualifier = parts.length >= 4 ? parts[3] : null;
+
+        // Map server broadcast types to subscription key types
+        // Server sends: "players", "meta", "forecast", "bm_bid", "da_bid", "id_bid",
+        //               "da_curve", "phase_change", "day_phase_change", "bm_advance",
+        //               "bm_clear", "da_clear", "da_curve_clear", "id_clear",
+        //               "settlement", "config", "event", "market"
+        // App subscribes to: "players", "meta", "forecast", "sp_contracts",
+        //                    "bm", "da", "id", "da_curves"
+        const typeMap = {
+          'bm_bid': 'bm', 'bm_clear': 'bm', 'bm_advance': 'meta',
+          'da_bid': 'da', 'da_clear': 'da',
+          'da_curve': 'da_curves', 'da_curve_clear': 'da_curves',
+          'id_bid': 'id', 'id_clear': 'id',
+          'phase_change': 'meta', 'day_phase_change': 'meta',
+          'config': 'meta', 'settlement': 'sp_contracts',
+          'server_settlement': 'server_settlement',
+        };
+        const mappedType = typeMap[type] || type;
+
+        let matches = false;
+        if (keyType === type || keyType === mappedType) {
+          if (keyQualifier != null) {
+            // Qualifier must match SP or cycle
+            matches = (sp != null && String(keyQualifier) === String(sp))
+                   || (cycle != null && String(keyQualifier) === String(cycle));
+          } else {
+            matches = true;
+          }
+        }
+
+        if (matches) {
           for (const cb of callbacks) {
             try {
               cb(data);

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ASSETS, SUPPLIERS, SCENARIOS, EVENTS, TICK_MS, MIN_SOC, MAX_SOC, DA_CYCLE, DA_MS, FREQ_FAIL_LO, FREQ_FAIL_HI, FREQ_FAIL_DURATION, TICK_SPEEDS, FORGIVENESS, GAME_MODES, ROLES, ID_WINDOW_MS, TUTORIAL_STEPS, SCORING_CONFIG, SP_DURATION_H } from "./shared/constants.js";
-import { clamp, f0, f1, fpp, spTime, uid, roomKey } from "./shared/utils.js";
+import { clamp, f0, f1, fpp, spTime, uid, roomKey, getOrCreatePlayerId, setPlayerId } from "./shared/utils.js";
 import { marketForSp, clearBM, feedbackMarketState, clearDA, computeForecasts } from "./engine/MarketEngine.js";
 import { availMW, availMWDirectional, updateSoF, initSoF } from "./engine/AssetPhysics.js";
 import { computeImbalanceSettlement } from "./engine/SettlementEngine.js";
@@ -174,14 +174,19 @@ export default function App() {
   const prevPhaseRef = useRef({ phase: "INIT", sp: 0 });
   const lastEventRef = useRef(null);
   const advanceInFlightRef = useRef(false);
+  const serverSettlementRef = useRef({});  // {sp: {pid: {cash, cashDelta, ...}}} — authoritative server settlement
   const gmCfg = GAME_MODES[gameMode] || GAME_MODES.FULL;
   const isForgive = gmCfg.forgiveness;
 
   const handleJoin = useCallback(async (chosenAsset, customConfig = null) => {
     if (!name.trim() || !room.trim() || !chosenAsset || !api) return;
     const def = { ...ASSETS[chosenAsset], ...(customConfig || {}) };
-    const id = uid(); const soc0 = initSoF(def);
-    setPid(id); setAsset(chosenAsset); setAssetConfig(customConfig); setSoc(soc0);
+    const id = getOrCreatePlayerId();
+    const soc0 = initSoF(def);
+    setPid(id);
+    setAsset(chosenAsset);
+    setAssetConfig(customConfig);
+    setSoc(soc0);
 
     // Initialize physical state based on startup requirements
     const requiresStartup = def.startupTime > 0;
@@ -195,10 +200,10 @@ export default function App() {
     });
 
     const assignedRole = isInstructor ? "instructor" : role;
-    
+
     // Connect to WebSocket for real-time updates
     connect(room);
-    
+
     // Create player via API
     await api.putPlayer(room, id, {
       name: name.trim(),
@@ -210,10 +215,59 @@ export default function App() {
       role: assignedRole,
       status: 'ACTIVE'
     });
-    
+
     // Create or update room
     await api.createRoom(room, scenarioId);
-    
+
+    // Always fetch and apply the latest state after join/rejoin
+    try {
+      const state = await api.engineGetState(room);
+      if (state) {
+        // Apply all relevant state fields to UI/game state
+        if (state.phase) setPhase(state.phase);
+        if (state.sp !== undefined) setSp(state.sp);
+        if (state.day !== undefined) setDay(state.day);
+        if (state.bmSubPhase !== undefined) setBmSubPhase(state.bmSubPhase);
+        if (state.players) setPlayers(state.players);
+        if (state.orderBook) setOrderBook(state.orderBook);
+        if (state.daOrderBook) setDaOrderBook(state.daOrderBook);
+        if (state.idOrderBook) setIdOrderBook(state.idOrderBook);
+        if (state.spHistory) setSpHistory(state.spHistory);
+        if (state.forecasts) setForecasts(state.forecasts);
+        if (state.publishedForecast) setPublishedForecast(state.publishedForecast);
+        if (state.roomScenario) setRoomScenario(state.roomScenario);
+        if (state.spContracts) setSpContracts(state.spContracts);
+        if (state.market) setMarket(state.market);
+        if (state.soc !== undefined) setSoc(state.soc);
+        if (state.cash !== undefined) setCash(state.cash);
+        if (state.daCash !== undefined) setDaCash(state.daCash);
+        if (state.positions) setPositions(state.positions);
+        if (state.contracts) setContracts(state.contracts);
+        if (state.daPositions) setDaPositions(state.daPositions);
+        if (state.imbalancePenalty !== undefined) setImbalancePenalty(state.imbalancePenalty);
+        if (state.earnedAchievements) setEarnedAchievements(state.earnedAchievements);
+        if (state.gameMode) setGameMode(state.gameMode);
+        if (state.role) setRole(state.role);
+        if (state.daCurves) setDaCurves(state.daCurves);
+        if (state.daAuctionResults) setDaAuctionResults(state.daAuctionResults);
+        if (state.playerScores) setPlayerScores(state.playerScores);
+        if (state.systemState) setSystemState(state.systemState);
+        if (state.overallScoreHistory) setOverallScoreHistory(state.overallScoreHistory);
+        if (state.physicalState) setPhysicalState(state.physicalState);
+        if (state.portfolio) setPortfolio(state.portfolio);
+        if (state.activeAssetIdx !== undefined) setActiveAssetIdx(state.activeAssetIdx);
+        if (state.portfolioSocs) setPortfolioSocs(state.portfolioSocs);
+        if (state.portfolioCash) setPortfolioCash(state.portfolioCash);
+        if (state.tutorialStep !== undefined) setTutorialStep(state.tutorialStep);
+        if (state.tutorialActive !== undefined) setTutorialActive(state.tutorialActive);
+        if (state.replayData) setReplayData(state.replayData);
+        if (state.replayIdx !== undefined) setReplayIdx(state.replayIdx);
+        if (state.showDebrief !== undefined) setShowDebrief(state.showDebrief);
+      }
+    } catch (err) {
+      console.error('[App] Failed to fetch/apply latest state after join:', err);
+    }
+
     setScreen("game");
   }, [name, room, api, isInstructor, scenarioId, role, connect]);
 
@@ -227,6 +281,11 @@ export default function App() {
 
     // Subscribe to room meta updates
     const unsubMeta = subscribe(`room:${room}:meta`, (data) => {
+      // Extract server settlement from bm_advance BEFORE updating phase/sp
+      // (phase/sp changes trigger the settlement useEffect which reads serverSettlementRef)
+      if (data?.settlement && typeof data.settlement === 'object') {
+        serverSettlementRef.current = data.settlement;
+      }
       if (data?.scenarioId) setRoomScenario(data.scenarioId);
       // New backend fields: dayPhase, currentSp, bmSubPhase, day
       if (data?.currentSp !== undefined) setSp(data.currentSp);
@@ -273,18 +332,30 @@ export default function App() {
       }
     });
 
+    // Listen for authoritative server settlement (prevents double cash computation)
+    const unsubServerSettlement = subscribe(`room:${room}:server_settlement`, (data) => {
+      if (data && typeof data === 'object') {
+        // data is the settlement dict keyed by player id
+        // Find which SP this settlement is for from the message context
+        // Store keyed by pid for the settlement block to consume
+        serverSettlementRef.current = data;
+        console.log('[App] Received server_settlement:', Object.keys(data));
+      }
+    });
+
     return () => {
       unsubPlayers?.();
       unsubMeta?.();
       unsubForecast?.();
       unsubSpContracts?.();
+      unsubServerSettlement?.();
     };
   }, [screen, room, api, subscribe]);
 
   // ─── NON-ASSET ROLE JOIN (NESO, ELEXON, TRADER, SUPPLIER) ───
   useEffect(() => {
     if (screen !== "game_no_asset") return;
-    const id = pid || uid();
+    const id = pid || getOrCreatePlayerId();
     setPid(id);
     setAsset("NONE");
     setSoc(100);
@@ -302,7 +373,59 @@ export default function App() {
       });
       api.updateRoom(room, { scenarioId });
     }
-    setScreen("game");
+    // Always fetch and apply the latest state after join/rejoin for non-asset roles
+    const fetchAndApplyState = async () => {
+      try {
+        if (api && room) {
+          const state = await api.engineGetState(room);
+          if (state) {
+            if (state.phase) setPhase(state.phase);
+            if (state.sp !== undefined) setSp(state.sp);
+            if (state.day !== undefined) setDay(state.day);
+            if (state.bmSubPhase !== undefined) setBmSubPhase(state.bmSubPhase);
+            if (state.players) setPlayers(state.players);
+            if (state.orderBook) setOrderBook(state.orderBook);
+            if (state.daOrderBook) setDaOrderBook(state.daOrderBook);
+            if (state.idOrderBook) setIdOrderBook(state.idOrderBook);
+            if (state.spHistory) setSpHistory(state.spHistory);
+            if (state.forecasts) setForecasts(state.forecasts);
+            if (state.publishedForecast) setPublishedForecast(state.publishedForecast);
+            if (state.roomScenario) setRoomScenario(state.roomScenario);
+            if (state.spContracts) setSpContracts(state.spContracts);
+            if (state.market) setMarket(state.market);
+            if (state.soc !== undefined) setSoc(state.soc);
+            if (state.cash !== undefined) setCash(state.cash);
+            if (state.daCash !== undefined) setDaCash(state.daCash);
+            if (state.positions) setPositions(state.positions);
+            if (state.contracts) setContracts(state.contracts);
+            if (state.daPositions) setDaPositions(state.daPositions);
+            if (state.imbalancePenalty !== undefined) setImbalancePenalty(state.imbalancePenalty);
+            if (state.earnedAchievements) setEarnedAchievements(state.earnedAchievements);
+            if (state.gameMode) setGameMode(state.gameMode);
+            if (state.role) setRole(state.role);
+            if (state.daCurves) setDaCurves(state.daCurves);
+            if (state.daAuctionResults) setDaAuctionResults(state.daAuctionResults);
+            if (state.playerScores) setPlayerScores(state.playerScores);
+            if (state.systemState) setSystemState(state.systemState);
+            if (state.overallScoreHistory) setOverallScoreHistory(state.overallScoreHistory);
+            if (state.physicalState) setPhysicalState(state.physicalState);
+            if (state.portfolio) setPortfolio(state.portfolio);
+            if (state.activeAssetIdx !== undefined) setActiveAssetIdx(state.activeAssetIdx);
+            if (state.portfolioSocs) setPortfolioSocs(state.portfolioSocs);
+            if (state.portfolioCash) setPortfolioCash(state.portfolioCash);
+            if (state.tutorialStep !== undefined) setTutorialStep(state.tutorialStep);
+            if (state.tutorialActive !== undefined) setTutorialActive(state.tutorialActive);
+            if (state.replayData) setReplayData(state.replayData);
+            if (state.replayIdx !== undefined) setReplayIdx(state.replayIdx);
+            if (state.showDebrief !== undefined) setShowDebrief(state.showDebrief);
+          }
+        }
+      } catch (err) {
+        console.error('[App] Failed to fetch/apply latest state after join (no-asset role):', err);
+      }
+      setScreen("game");
+    };
+    fetchAndApplyState();
   }, [screen, api, room]);
 
   useEffect(() => {
@@ -440,6 +563,9 @@ export default function App() {
 
     const { pid: id, name: n, room: rm, asset: ak, orderBookSnap, daOrderBookSnap, soc: s, gameMode } = refs.current;
 
+    // Hoisted BM result — accessible by both BM_CLOSE block and settlement block
+    let bmMine = null;
+
     // --- DA CLOSED ---
     if (old.phase === "DA") {
       const curveEntries = Object.values(refs.current.daCurves || {});
@@ -518,7 +644,7 @@ export default function App() {
         if (myDa) {
           const pos = myDa.side === "offer" ? myDa.mwAcc : -myDa.mwAcc;
           setContractPosition(pos);
-          const daRev = +(myDa.mwAcc * daRes.cp * SP_DURATION_H).toFixed(2);
+          const daRev = +(myDa.mwAcc * daRes.cp * SP_DURATION_H * (myDa.side === "offer" ? 1 : -1)).toFixed(2);
           setDaCash(prev => prev + daRev);
           setDaResult({ accepted: true, revenue: daRev, cp: daRes.cp, mw: myDa.mwAcc });
           addToast({ emoji: "📋", title: "DA Auction Cleared", body: `Position: ${pos > 0 ? "+" : ""}${f0(pos)}MW @ £${f1(daRes.cp)}`, col: "#f5b222" });
@@ -544,6 +670,8 @@ export default function App() {
         const bid = bids[bIdx];
         const offer = offers[oIdx];
         if (bid.price >= offer.price) {
+          // Skip self-trade: a player cannot match against their own order
+          if (bid.id === offer.id) { oIdx++; continue; }
           const matchMw = Math.min(bid.mw, offer.mw);
           const matchPrice = (bid.price + offer.price) / 2;
 
@@ -593,6 +721,7 @@ export default function App() {
       const res = clearBM(bmArr, market.actual);
       setMarket(prev => ({ ...prev, actual: feedbackMarketState(prev.actual, res) })); // Update with post-clearing prices and frequency
       const mine = res.accepted.find(a => a.id === id);
+      bmMine = mine; // hoist for settlement block access
 
       const myDef = { ...ASSETS[ak], ...(refs.current.assetConfig || {}) };
       const newS = mine ? updateSoF(myDef, s, mine.mwAcc, market.actual.isShort) : s;
@@ -618,6 +747,11 @@ export default function App() {
           if (!next[old.sp][b.id]) next[old.sp][b.id] = {};
           next[old.sp][b.id].bmAccepted = { mw: b.mwAcc, price: res.cp, rev: b.revenue };
         }
+        // Write startup flag for current player so settlement can read it
+        if (startupDeduction > 0) {
+          if (!next[old.sp][id]) next[old.sp][id] = {};
+          next[old.sp][id].startupOccurred = true;
+        }
         return next;
       });
 
@@ -627,6 +761,11 @@ export default function App() {
     }
 
     // --- ENTERING SETTLEMENT (Elexon Calculation) ---
+    // Server settles via game_loop._settle_sp() and broadcasts authoritative per-player
+    // cash via server_settlement. When available (serverSettlementRef), we use the
+    // server's cumulative cash directly. Otherwise (standalone/offline), we fall back
+    // to local computation. UI state (spContracts, spHistory, scoring) is always
+    // computed locally for responsiveness.
     if (phase === "SETTLED" || phase === "RESULTS" || phase === "BM_CLOSE") {
       const settleSp = old.sp; // Use the SP that just completed, NOT the current sp
       // Bug #11 fix: capture the market state NOW before the timeout fires,
@@ -634,6 +773,7 @@ export default function App() {
       const settledMarket = market;
       setTimeout(() => {
         // Run global settlement calculations for Elexon & NESO visibility
+        let bsuoSCharge = 0; // hoisted so local settlement can read it after updater runs
         setSpContracts(prev => {
           const next = { ...prev };
           if (!next[settleSp]) next[settleSp] = {};
@@ -664,7 +804,8 @@ export default function App() {
 
             const pDef = { ...ASSETS[p.assetKey || p.asset], ...(p.assetConfig || {}) };
             const varCostMwh = pDef.varCost || pDef.wear || 0;
-            const operatingCost = -(Math.abs(pActualPhysical) * varCostMwh * SP_DURATION_H);
+            const bmWearAlreadyPaid = Math.abs(pActualPosMw) * (pDef.wear || 0) * SP_DURATION_H;
+            const operatingCost = -(Math.abs(pActualPhysical) * varCostMwh * SP_DURATION_H) + bmWearAlreadyPaid;
             const startupCost = c.startupOccurred ? -(pDef.startupCost || 0) : 0;
 
             c.physicalMw = pActualPhysical;
@@ -680,36 +821,36 @@ export default function App() {
             };
             next[settleSp][p.id] = c;
           });
-          return next;
-        });
 
-        // Calculate BSUoS socialization
-        const settlements = Object.values(refs.current.spContracts[settleSp] || {});
-        const totalImbCash = settlements.reduce((sum, c) => sum + (c.settlement?.imbCash || 0), 0);
-        const numPlayers = settlements.length;
-        const bsuoSCharge = -totalImbCash / numPlayers;
+          // Phase 2: BSUoS socialization (computed inside same updater to read fresh settlement data)
+          const spEntries = Object.values(next[settleSp] || {});
+          const totalImbCost = spEntries.reduce((sum, c) => {
+            const imb = c.settlement?.imbCash || 0;
+            return sum + (imb < 0 ? Math.abs(imb) : 0); // only count negative penalties
+          }, 0);
+          const numPlayers = spEntries.length || 1;
+          bsuoSCharge = totalImbCost > 0 ? -(totalImbCost / numPlayers) : 0;
+          if (bsuoSCharge !== 0) {
+            Object.keys(next[settleSp]).forEach(pid => {
+              if (next[settleSp][pid]?.settlement) {
+                next[settleSp][pid].settlement.bsuoSCharge = bsuoSCharge;
+                next[settleSp][pid].settlement.totalCash += bsuoSCharge;
+              }
+            });
+          }
 
-        // Update spContracts with BSUoS
-        setSpContracts(prev => {
-          const next = { ...prev };
-          Object.keys(next[settleSp] || {}).forEach(pid => {
-            if (next[settleSp][pid]?.settlement) {
-              next[settleSp][pid].settlement.bsuoSCharge = bsuoSCharge;
-              next[settleSp][pid].settlement.totalCash += bsuoSCharge;
-            }
-          });
           return next;
         });
 
         // Apply local results for current user
-        const myC = refs.current.spContracts[sp]?.[id] || {};
+        const myC = refs.current.spContracts[settleSp]?.[id] || {};
         const daRev = myC.daMw ? (myC.daSide === "offer" ? myC.daMw * myC.daPrice * SP_DURATION_H : -myC.daMw * myC.daPrice * SP_DURATION_H) : 0;
         const idRev = myC.idMw ? (myC.idSide === "offer" ? myC.idMw * myC.idPrice * SP_DURATION_H : -myC.idMw * myC.idPrice * SP_DURATION_H) : 0;
         const bmRev = myC.bmAccepted?.rev || 0;
 
         const myDef = { ...ASSETS[ak], ...(refs.current.assetConfig || {}) };
         const contractPosMw = refs.current.contractPosition;
-        const actualPosMw = myC.bmAccepted ? (market.actual.isShort ? myC.bmAccepted.mw : -myC.bmAccepted.mw) : 0;
+        const actualPosMw = myC.bmAccepted ? (settledMarket.actual.isShort ? myC.bmAccepted.mw : -myC.bmAccepted.mw) : 0;
 
         const intendedPhysical = contractPosMw + actualPosMw;
         let actualPhysical = intendedPhysical;
@@ -749,7 +890,7 @@ export default function App() {
           setPhysicalState(pState);
         }
 
-        if (market.actual.trippedAssets?.includes(ak)) {
+        if (settledMarket.actual.trippedAssets?.includes(ak)) {
           // BUG FIX: For DSR with pending rebound debt, don't zero out - set forced rebound state
           const isDsr = myDef.kind === "dsr";
           if (isDsr && pState.pendingReboundMwh > 0 && pState.reboundSpsRemaining === 0) {
@@ -841,24 +982,40 @@ export default function App() {
           }
         }
 
-        const deviation = actualPhysical - contractPosMw;
-        const imbPrc = market.actual.isShort ? market.actual.sbp * 1.05 : market.actual.ssp * 0.95;
+        const deviation = actualPhysical - (contractPosMw + actualPosMw);
+        const imbPrc = deviation >= 0 ? settledMarket.actual.ssp : settledMarket.actual.sbp;
         const isForgive = gameMode === "TUTORIAL";
         // Bug #9 fix: signed deviation — over-delivery (positive into short) should earn, not penalize
         const forgiveMult = isForgive ? (FORGIVENESS.penaltyMultiplier || 0.5) : 1;
         const imbPen = deviation >= 0
-          ? (deviation * market.actual.ssp * SP_DURATION_H * forgiveMult)   // Over-delivery: sell excess at SSP
-          : (deviation * market.actual.sbp * SP_DURATION_H * forgiveMult);  // Under-delivery: buy shortfall at SBP
+          ? (deviation * settledMarket.actual.ssp * SP_DURATION_H * forgiveMult)   // Over-delivery: sell excess at SSP
+          : (deviation * settledMarket.actual.sbp * SP_DURATION_H * forgiveMult);  // Under-delivery: buy shortfall at SBP
 
-        // Deduct Variable Cost (Fuel/Wear) - Note: storage 'wear' is based on throughput (absolute MW)
+        // Deduct Variable Cost (Fuel/Wear) - subtract wear already paid in BM revenue
         const varCostMwh = myDef.varCost || myDef.wear || 0;
-        const operatingCost = -(Math.abs(actualPhysical) * varCostMwh * SP_DURATION_H);
+        const bmWearAlreadyPaid = Math.abs(actualPosMw) * (myDef.wear || 0) * SP_DURATION_H;
+        const operatingCost = -(Math.abs(actualPhysical) * varCostMwh * SP_DURATION_H) + bmWearAlreadyPaid;
 
         // Interconnector is now a system asset; congestion revenue handled by engine if needed
         let congestionRev = 0;
 
-        const totalSpRev = daRev + idRev + bmRev + imbPen + congestionRev + operatingCost + bsuoSCharge;
+        const startupCost = myC.startupOccurred ? -(myDef.startupCost || 0) : 0;
+        const cmPayment = myC.bmAccepted ? (myDef.cmPayment || 0) : 0;
+        const totalSpRev = daRev + idRev + bmRev + imbPen + congestionRev + operatingCost + bsuoSCharge + startupCost + cmPayment;
         let newC = refs.current.cash + totalSpRev;
+
+        // Cross-validate with server settlement if available (log-only).
+        // Server cashDelta only includes imbalance + operating cost + BSUoS,
+        // so compare against those same components locally.
+        const serverSettle = serverSettlementRef.current?.[id];
+        if (serverSettle && serverSettle.cashDelta !== undefined) {
+          const serverDelta = serverSettle.cashDelta;
+          const localComparable = imbPen + operatingCost + bsuoSCharge;
+          if (Math.abs(serverDelta - localComparable) > 1) {
+            console.warn(`[Settlement] Server/client delta mismatch: server=${serverDelta.toFixed(2)}, local=${localComparable.toFixed(2)} (diff=${(serverDelta - localComparable).toFixed(2)})`);
+          }
+        }
+        serverSettlementRef.current = {};
 
         // Margin liquidation for traders
         if (role === "TRADER" && (newC + refs.current.daCash) < ROLES.TRADER.marginFloor) {
@@ -884,20 +1041,44 @@ export default function App() {
           addToast({ emoji: "⚠️", title: "Imbalance Penalty", body: `Deviated ${f0(Math.abs(deviation))}MW! -£${f0(Math.abs(imbPen))}`, col: "#f0455a" });
         }
 
-        const accepted = !!mine; // Bug #1 fix: track whether player was dispatched
-        setSpHistory(prev => [{ sp, niv: market.actual.niv, cp: market.actual.sbp, sbp: market.actual.sbp, ssp: market.actual.ssp, wf: market.actual.wf, revenue: totalSpRev, event: market.actual.event, contractPosMw, actualPhysical, imbPrc, imbPen, daRev, bmRev, idRev, operatingCost, accepted, mw: mine?.mwAcc || 0, time: new Date().toLocaleTimeString() }, ...prev.slice(0, 47)]);
+        const accepted = !!bmMine; // Bug #1 fix: track whether player was dispatched
+        setSpHistory(prev => [{
+          sp,
+          niv: settledMarket.actual.niv,
+          indicativeNiv: settledMarket.forecast?.indicativeNiv,
+          forecastSbp: settledMarket.forecast?.sbp,
+          forecastSsp: settledMarket.forecast?.ssp,
+          cp: settledMarket.actual.sbp,
+          sbp: settledMarket.actual.sbp,
+          ssp: settledMarket.actual.ssp,
+          wf: settledMarket.actual.wf,
+          revenue: totalSpRev,
+          event: settledMarket.actual.event,
+          contractPosMw,
+          actualPhysical,
+          imbPrc,
+          imbPen,
+          daRev,
+          bmRev,
+          idRev,
+          operatingCost,
+          bsuoSCharge,
+          accepted,
+          mw: bmMine?.mwAcc || 0,
+          time: new Date().toLocaleTimeString()
+        }, ...prev.slice(0, 47)]);
 
         // ─── SCORING ENGINE: compute scores after each SP ───
         const playerImbalance = deviation; // signed MW deviation
-        const systemNIV = market.actual.niv;
+        const systemNIV = settledMarket.actual.niv;
         const spImpact = computePlayerSystemImpact(playerImbalance, systemNIV);
         const isStressSP = Math.abs(systemNIV) > (SCORING_CONFIG.stressNIVThreshold || 300);
         const deliveredOk = Math.abs(deviation) < 5; // within 5MW tolerance
 
         // Update system state
         setSystemState(prev => {
-          const balancingCost = Math.abs(market.actual.niv) * (market.actual.sbp || 50) * 0.01;
-          const updated = updateSystemState(prev, { sp, niv: systemNIV, balancingCost, freq: market.actual.freq, blackout: false });
+          const balancingCost = Math.abs(settledMarket.actual.niv) * (settledMarket.actual.sbp || 50) * 0.01;
+          const updated = updateSystemState(prev, { sp, niv: systemNIV, balancingCost, freq: settledMarket.actual.freq, blackout: false });
           updated.playerImpacts = updatePlayerImpact(prev.playerImpacts, id, spImpact, isStressSP, deliveredOk);
           return updated;
         });
@@ -951,7 +1132,7 @@ export default function App() {
             }
           }
         }
-        setReplayData(prev => [...prev, { sp, market, orderBook: refs.current.orderBookSnap }].slice(-200));
+        setReplayData(prev => [...prev, { sp, market: settledMarket, orderBook: refs.current.orderBookSnap }].slice(-200));
       }, 300);
     }
 
@@ -1139,7 +1320,11 @@ export default function App() {
 
   if (screen === "lobby") return <LobbyScreen name={name} setName={setName} room={room} setRoom={setRoom} gunReady={ready} onNext={() => {
     // When joining from Lobby, go to Waiting Room and generate stable PID
-    if (!pid) setPid(uid());
+        if (!pid) {
+          const id = getOrCreatePlayerId();
+          setPid(id);
+          setPlayerId(id);
+        }
     setScreen("waiting_room");
   }} />;
   if (screen === "waiting_room") return <WaitingRoom gunReady={ready} room={room} name={name} pid={pid} setPid={setPid} role={role} setRole={setRole} setScreen={setScreen} isHost={isInstructor} setIsHost={setIsInstructor} gameMode={gameMode} setGameMode={setGameMode} scenarioId={scenarioId} setScenarioId={setScenarioId} players={players} />;

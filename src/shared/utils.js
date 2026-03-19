@@ -12,4 +12,19 @@ export const uid = () => {
     const tabId = "p_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 9) + "_" + Math.random().toString(36).slice(2, 6);
     return tabId;
 };
+// Persistent playerId in localStorage
+export const getOrCreatePlayerId = () => {
+    const key = 'gridforge_playerId';
+    let playerId = localStorage.getItem(key);
+    if (!playerId) {
+        playerId = uid();
+        localStorage.setItem(key, playerId);
+    }
+    return playerId;
+};
+
+export const setPlayerId = (playerId) => {
+    const key = 'gridforge_playerId';
+    localStorage.setItem(key, playerId);
+};
 export const roomKey = (room, suffix) => `gf_v4_${room.toUpperCase()}_${suffix}`;

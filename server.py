@@ -12,7 +12,7 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Path
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Path, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +20,7 @@ import asyncpg
 
 # Server-authoritative engine
 from engine import game_loop
+from engine.constants import SP_DURATION_H
 from engine.market_engine import market_for_sp, clear_bm, clear_da, compute_forecasts
 from engine.da_curve_engine import clear_full_auction, validate_full_curve
 from engine.settlement_engine import compute_imbalance_settlement
@@ -684,7 +685,19 @@ async def engine_advance_bm(room_id: str):
             "UPDATE rooms SET phase = $1, sp = $2, last_active = CURRENT_TIMESTAMP WHERE room_id = $3",
             rs["dayPhase"], rs["currentSp"], room_id
         )
+
         await manager.broadcast_to_room(room_id, {"type": "bm_advance", "data": result})
+
+        # Broadcast server settlement for client-side logging/validation
+        # (client computes its own authoritative cash and persists via putPlayer)
+        settlement = result.get("settlement")
+        if settlement:
+            await manager.broadcast_to_room(room_id, {
+                "type": "server_settlement",
+                "sp": result.get("sp"),
+                "data": settlement,
+            })
+
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -791,13 +804,13 @@ async def engine_clear_da_curves(room_id: str):
 
         result = clear_full_auction(player_curves, market_ctx_array)
 
-        # Persist per-player DA revenues
+        # Persist per-player DA revenues (sellers earn, buyers pay)
         for pid, vols in result.get("volumes", {}).items():
             total_rev = sum(
-                abs(v) * result["prices"][i] * 0.5
+                (abs(v) * result["prices"][i] * SP_DURATION_H) * (-1 if v >= 0 else 1)
                 for i, v in enumerate(vols)
             )
-            if total_rev > 0:
+            if total_rev != 0:
                 await db.execute(
                     "UPDATE players SET da_cash = da_cash + $1, cash = cash + $1, updated_at = CURRENT_TIMESTAMP WHERE player_id = $2 AND room_id = $3",
                     total_rev, pid, room_id
