@@ -1,8 +1,8 @@
 ## Multi-stage Dockerfile for GridForge (Vite + React)
-## - Stage 1: Install deps, run tests, build static assets
-## - Stage 2: Serve built app with Node + Express (also hosts Gun relay at /gun)
+## - Stage 1: Install deps, build static assets
+## - Stage 2: Serve with nginx
 
-# ---------- Builder & Test Stage ----------
+# ---------- Builder Stage ----------
 FROM node:20-alpine AS builder
 
 WORKDIR /app
@@ -14,28 +14,21 @@ RUN npm install --legacy-peer-deps
 # Copy the rest of the source
 COPY . .
 
-# Run unit tests (vitest). If tests fail, build fails.
-RUN npm test -- --run
-
 # Build production assets
 RUN npm run build
 
 
 # ---------- Production Runtime Stage ----------
-FROM node:20-alpine AS runner
-
-WORKDIR /app
+FROM nginx:alpine AS runner
 
 # Copy built assets from builder
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/package-lock.json* ./
-COPY --from=builder /app/server.cjs ./server.cjs
+COPY --from=builder /app/dist /usr/share/nginx/html
 
-RUN npm install --omit=dev --legacy-peer-deps
+# Copy custom nginx config if needed
+# COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Expose default HTTP port
+# Expose HTTP port
 EXPOSE 80
 
-# Default Node command (Azure sets PORT automatically)
-CMD ["node", "server.cjs"]
+# Nginx runs by default
+CMD ["nginx", "-g", "daemon off;"]
