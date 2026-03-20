@@ -17,7 +17,7 @@ const roleAssetOptions = (roleId) => {
 /* ─── WAITING ROOM ─── */
 export default function WaitingRoom({
     api, room, name, pid, role, setRole, setScreen,
-    isHost, setIsHost, gameMode, setGameMode, scenarioId, setScenarioId, players, roomState, connect
+    isHost, setIsHost, gameMode, setGameMode, scenarioId, setScenarioId, players, setPlayers, roomState, connect
 }) {
     const [copied, setCopied] = useState(false);
     const joinedRef = useRef(false);
@@ -30,18 +30,43 @@ export default function WaitingRoom({
         // Connect WebSocket for real-time updates
         connect(room);
         
-        // Register player via API - server determines if we're the first (host)
+        // Create room if it doesn't exist, then register player via API
         if (api && pid) {
-            api.putPlayer(room, pid, {
-                name: (name || "").trim(),
-                preferredRole: null,
-                preferredAssetKey: null,
-                lastSeen: Date.now(),
-            }).then(() => {
-                console.log('[WaitingRoom] Player registered:', { pid, name });
-            }).catch(err => {
-                console.error('[WaitingRoom] Failed to register player:', err);
-            });
+            api.createRoom(room, scenarioId || "BAU")
+                .catch(err => console.warn('[WaitingRoom] createRoom skipped/failed:', err))
+                .then(() => api.putPlayer(room, pid, {
+                    name: (name || "").trim(),
+                    preferredRole: null,
+                    preferredAssetKey: null,
+                    lastSeen: Date.now(),
+                }))
+                .then(async () => {
+                    console.log('[WaitingRoom] Player registered:', { pid, name });
+                    // Fetch full player list to populate state (fixes host detection race)
+                    try {
+                        const allPlayers = await api.getPlayers(room);
+                        if (Array.isArray(allPlayers)) {
+                            // Determine host status immediately from the database truth
+                            const me = allPlayers.find(p => p.player_id === pid);
+                            const otherNamed = allPlayers.filter(p => p.player_id !== pid && p.name);
+                            if (!isHost && me?.name && otherNamed.length === 0) {
+                                console.log('[WaitingRoom] Detected as first player from API - setting as host');
+                                setIsHost(true);
+                            }
+
+                            if (allPlayers.length > 0 && setPlayers) {
+                                const keyed = {};
+                                allPlayers.forEach(p => { if (p.player_id) keyed[p.player_id] = p; });
+                                setPlayers(prev => ({ ...prev, ...keyed }));
+                            }
+                        }
+                    } catch (err) {
+                        console.warn('[WaitingRoom] Failed to fetch players after register:', err);
+                    }
+                })
+                .catch(err => {
+                    console.error('[WaitingRoom] Failed to register player:', err);
+                });
         }
     }, [api, room, pid, name, connect]);
 
@@ -54,20 +79,7 @@ export default function WaitingRoom({
         return () => clearInterval(interval);
     }, [api, room, pid]);
 
-    // Detect if this player is the first player (host)
-    useEffect(() => {
-        if (!pid || !players || isHost) return;
-        
-        const playerEntries = Object.entries(players);
-        const otherPlayers = playerEntries.filter(([id, p]) => id !== pid && p.name);
-        const me = players[pid];
-        
-        // If I'm the only player with a name, I'm the host
-        if (me && me.name && otherPlayers.length === 0) {
-            console.log('[WaitingRoom] Detected as first player - setting as host');
-            setIsHost(true);
-        }
-    }, [players, pid, isHost, setIsHost]);
+
     useEffect(() => {
         const dbRole = players[pid]?.role;
         if (dbRole && dbRole !== role) {

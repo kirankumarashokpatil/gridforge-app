@@ -77,7 +77,7 @@ export default function App() {
   const [pid, setPid] = useState(null);
   const [asset, setAsset] = useState(null);
   const [assetConfig, setAssetConfig] = useState(null);
-  const [isInstructor, setIsInstructor] = useState(false);
+  const [isHost, setIsHost] = useState(false);
   const [scenarioId, setScenarioId] = useState("NORMAL");
   const [sp, setSp] = useState(0);            // currentSp from backend (0 = pre-REALTIME)
   const [phase, setPhase] = useState("FORECAST"); // dayPhase from backend
@@ -170,7 +170,7 @@ export default function App() {
     pendingReboundMwh: 0,
   });
 
-  const refs = useRef({}); refs.current = { sp, phase, bmSubPhase, day, phaseStartTs, soc, cash, daCash, submitted, pid, name, room, asset, assetConfig, isInstructor, scenarioId: roomScenario, gameMode, role, contractPosition, positions, contracts, daPositions, orderBookSnap: orderBook, daOrderBookSnap: daOrderBook, idOrderBookSnap: idOrderBook, spContracts, players, physicalState, msLeft, tickSpeed, daCurves };
+  const refs = useRef({}); refs.current = { sp, phase, bmSubPhase, day, phaseStartTs, soc, cash, daCash, submitted, pid, name, room, asset, assetConfig, isHost, scenarioId: roomScenario, gameMode, role, contractPosition, positions, contracts, daPositions, orderBookSnap: orderBook, daOrderBookSnap: daOrderBook, idOrderBookSnap: idOrderBook, spContracts, players, physicalState, msLeft, tickSpeed, daCurves };
   const prevPhaseRef = useRef({ phase: "INIT", sp: 0 });
   const lastEventRef = useRef(null);
   const advanceInFlightRef = useRef(false);
@@ -199,7 +199,7 @@ export default function App() {
       pendingReboundMwh: 0,
     });
 
-    const assignedRole = isInstructor ? "instructor" : role;
+    const assignedRole = role;
 
     // Connect to WebSocket for real-time updates
     connect(room);
@@ -269,13 +269,20 @@ export default function App() {
     }
 
     setScreen("game");
-  }, [name, room, api, isInstructor, scenarioId, role, connect]);
+  }, [name, room, api, scenarioId, role, connect]);
 
   useEffect(() => {
     if ((screen !== "game" && screen !== "waiting_room") || !api || !room) return;
     const unsubPlayers = subscribe(`room:${room}:players`, (data) => {
       if (data && typeof data === 'object') {
-        setPlayers(prev => ({ ...prev, ...data }));
+        // Server broadcasts {player_id, name, status, ...} — key by player_id
+        const playerId = data.player_id;
+        if (playerId) {
+          setPlayers(prev => ({ ...prev, [playerId]: { ...(prev[playerId] || {}), ...data } }));
+        } else {
+          // Fallback: if data is already keyed by player IDs
+          setPlayers(prev => ({ ...prev, ...data }));
+        }
       }
     });
 
@@ -343,6 +350,15 @@ export default function App() {
       }
     });
 
+    // Bootstrap: fetch existing players from API so host detection works immediately
+    api.getPlayers(room).then(allPlayers => {
+      if (Array.isArray(allPlayers) && allPlayers.length > 0) {
+        const keyed = {};
+        allPlayers.forEach(p => { if (p.player_id) keyed[p.player_id] = p; });
+        setPlayers(prev => ({ ...prev, ...keyed }));
+      }
+    }).catch(err => console.warn('[App] Failed to fetch initial players:', err));
+
     return () => {
       unsubPlayers?.();
       unsubMeta?.();
@@ -361,7 +377,7 @@ export default function App() {
     setSoc(100);
     if (role === "TRADER") setCash(5000);
     if (api && room) {
-      const assignedRole = isInstructor ? "instructor" : role;
+      const assignedRole = role;
       api.putPlayer(room, id, {
         name: name.trim(),
         asset: "NONE",
@@ -521,14 +537,14 @@ export default function App() {
   useEffect(() => {
     if (screen !== "game" || blackout) return;
     const loop = setInterval(() => {
-      const { phaseStartTs: pts, tickSpeed: ts, isInstructor, paused: isPaused, gameMode } = refs.current;
+      const { phaseStartTs: pts, tickSpeed: ts, isHost, paused: isPaused, gameMode } = refs.current;
       if (isPaused || !pts) return;
 
       const elapsed = Date.now() - pts;
       const remaining = Math.max(0, ts - elapsed);
       setMsLeft(remaining);
 
-      if (remaining <= 0 && isInstructor) {
+      if (remaining <= 0 && isHost) {
         instructorNextPhase();
       }
 
@@ -1113,7 +1129,7 @@ export default function App() {
         }, 100);
 
         if (api && rm) {
-          const assignedRole = refs.current.isInstructor ? "instructor" : refs.current.role;
+          const assignedRole = refs.current.role;
           // Compute scores for API publish
           const quickStats = buildPlayerStats(assignedRole, { spHistory: refs.current.spHistory || [], assetKey: ak, soc: refs.current.soc, cash: newC, daCash: refs.current.daCash, imbalancePenalty: refs.current.imbalancePenalty, systemImpacts: refs.current.systemState?.playerImpacts || {}, pid: id, congestionRevenue: congestionRev });
           const quickRole = computeRoleScore(assignedRole, quickStats);
@@ -1121,10 +1137,10 @@ export default function App() {
           const quickOverall = computeOverallScore(quickRole.roleScore, quickSys);
           api.putPlayer(rm, id, { name: n, asset: ak, cash: newC, sof: refs.current.soc, role: assignedRole, roleScore: quickRole.roleScore, systemScore: quickSys, overallScore: quickOverall });
 
-          // Publish the master settlement record if I am the operator (e.g. Instructor or NESO)
-          // Since all clients compute it identically (deterministic), any one can publish it, 
-          // but having NESO/Instructor do it ensures exactly one authoritative write.
-          if (assignedRole === "instructor" || assignedRole === "NESO") {
+          // Publish the master settlement record if I am the operator (NESO host)
+          // Since all clients compute it identically (deterministic), any one can publish it,
+          // but having NESO do it ensures exactly one authoritative write.
+          if (assignedRole === "NESO") {
             const settleSp = old.sp;
             const contractsForSp = refs.current.spContracts[settleSp];
             if (contractsForSp) {
@@ -1195,7 +1211,7 @@ export default function App() {
     setPaused(p => {
       const next = !p;
       if (api && room) api.updateRoom(room, { paused: next });
-      addToast({ emoji: next ? "⏸️" : "▶️", title: next ? "GAME PAUSED" : "GAME RESUMED", body: next ? "Instructor has frozen the game for discussion" : "Game is live again", col: next ? "#f5b222" : "#1de98b" });
+      addToast({ emoji: next ? "⏸️" : "▶️", title: next ? "GAME PAUSED" : "GAME RESUMED", body: next ? "Host has frozen the game for discussion" : "Game is live again", col: next ? "#f5b222" : "#1de98b" });
       return next;
     });
   }, [api, room, addToast]);
@@ -1327,7 +1343,7 @@ export default function App() {
         }
     setScreen("waiting_room");
   }} />;
-  if (screen === "waiting_room") return <WaitingRoom api={api} connect={connect} room={room} name={name} pid={pid} role={role} setRole={setRole} setScreen={setScreen} isHost={isInstructor} setIsHost={setIsInstructor} gameMode={gameMode} setGameMode={setGameMode} scenarioId={scenarioId} setScenarioId={setScenarioId} players={players} />;
+  if (screen === "waiting_room") return <WaitingRoom api={api} connect={connect} room={room} name={name} pid={pid} role={role} setRole={setRole} setScreen={setScreen} isHost={isHost} setIsHost={setIsHost} gameMode={gameMode} setGameMode={setGameMode} scenarioId={scenarioId} setScenarioId={setScenarioId} players={players} setPlayers={setPlayers} />;
   if (screen === "asset") return <AssetScreen onSelect={handleJoin} playerName={name} room={room} scenario={sc} role={role} />;
   if (screen === "game_no_asset") return (
     <div style={{ background: "#050e16", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", color: "#38c0fc" }}>
@@ -1382,7 +1398,7 @@ export default function App() {
       daOrderBook: Object.values(daOrderBook).filter(b => b && b.mw),
       daResult, currentSp: sp, simRes: lastRes, bmOrderBook: allBids,
       allBids, lastRes, forecasts, publishedForecast, playerName: name, room, scenario: sc,
-      isInstructor, paused, freqBreachSec, contractPosition, imbalancePenalty, earnedAchievements, gameMode, role,
+      isInstructor: isHost, paused, freqBreachSec, contractPosition, imbalancePenalty, earnedAchievements, gameMode, role,
       onTickSpeedChange: instructorSetSpeed, onPauseToggle: instructorTogglePause, onNextPhase: instructorNextPhase,
       onExecuteEvent: instructorTrigger, onScenarioChange: instructorSetScenario, soc, players,
       physicalState, setPhysicalState,
