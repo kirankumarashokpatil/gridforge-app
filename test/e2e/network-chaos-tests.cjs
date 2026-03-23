@@ -35,7 +35,7 @@
 const puppeteer = require('puppeteer');
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:5173';
+const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:3000';
 const HEADLESS = process.env.HEADLESS !== 'false';
 const SLOW_MO = parseInt(process.env.SLOW_MO || '0', 10);
 const ROOM_CODE = 'NET_' + Date.now().toString().slice(-6);

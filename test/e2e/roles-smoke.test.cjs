@@ -1,25 +1,22 @@
 /**
  * roles-smoke.test.cjs
  *
- * GridForge – Role & Asset Smoke Test
- * ------------------------------------
+ * GridForge – Role & Asset Smoke Test (NESO-Authority Model)
+ * -----------------------------------------------------------
  * Puppeteer script that verifies every role + asset combination can
  * successfully navigate from the lobby all the way into the game UI.
  *
- * Join flow (must match App.jsx exactly):
- *   1. Lobby: enter name + room code → click "JOIN WAITING ROOM →"
- *   2. WaitingRoom: select a ROLE button → click "START GAME →" (host)
- *      or "SELECT ASSET →" (asset roles) or "JOIN GAME →" (non-asset roles)
- *   3. AssetScreen (if role.canOwnAssets):
- *        → click "SELECT OR CONFIGURE {ASSET_NAME} →" button (opens config panel)
- *        → click "CONFIRM & JOIN SIMULATION →" button (joins game)
- *   4. Game UI: verify SP indicator "/48" is present.
+ * NESO-Authority Join Flow (2 browsers per test):
+ *   1. Browser 1 (NESO host): joins room → auto-assigned NESO
+ *   2. Browser 2 (target role): joins same room
+ *   3. NESO assigns role + asset to Browser 2 via dropdowns
+ *   4. Browser 2 clicks READY
+ *   5. NESO clicks START GAME
+ *   6. Verify Browser 2's game UI shows SP indicator "/48"
  *
  * Roles tested:
- *   - Non-asset roles: Trader, Supplier
- *     (NESO and Elexon are isSystem: true so they're auto-assigned to host/unavailable)
- *   - Asset roles: Generator (Gas Peaker), BESS (Grid BESS),
- *                  DSR (Demand Response), Interconnector (IFA France)
+ *   - Non-asset roles: Trader, Supplier, Elexon
+ *   - Asset roles: Generator (OCGT), BESS (BESS_M), DSR
  *
  * Each test gets its own unique room to avoid cross-contamination.
  *
@@ -27,47 +24,34 @@
  *   node test/e2e/roles-smoke.test.cjs
  *
  * Env vars:
- *   GRIDFORGE_URL – base URL (default: http://localhost:5173)
+ *   GRIDFORGE_URL – base URL (default: http://localhost:3000)
  *   HEADLESS      – set to "false" to watch the browsers
  */
 
 'use strict';
 
 const puppeteer = require('puppeteer');
-const { spawn } = require('child_process');
 
-const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:5173';
+const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:3000';
 const HEADLESS = process.env.HEADLESS !== 'false';
 
 // ─── Test matrix: role + asset combinations ──────────────────────────────────
-// roleLabel must match the ROLES[x].name text rendered in WaitingRoom buttons.
-// assetName (if provided) must match ASSETS[x].name used in the button text
-// "SELECT OR CONFIGURE {ASSET_NAME} →" on AssetScreen.
 const TEST_CASES = [
-  // Non-asset roles (skip AssetScreen entirely)
-  // NOTE: NESO and Elexon are isSystem: true in constants.js, so they're hidden
-  // from WaitingRoom role selection and cannot be tested via UI button clicks.
-  { name: 'Smoke_Trader', roleLabel: 'Trader', needsAsset: false },
-  { name: 'Smoke_Supplier', roleLabel: 'Supplier', needsAsset: false },
-
-  // Asset roles (go through AssetScreen)
-  { name: 'Smoke_Gen_OCGT', roleLabel: 'Generator', needsAsset: true, assetName: 'Gas Peaker' },
-  { name: 'Smoke_BESS_M', roleLabel: 'Battery Storage', needsAsset: true, assetName: 'Grid BESS' },
-  { name: 'Smoke_DSR', roleLabel: 'Demand Controller', needsAsset: true, assetName: 'Demand Response' },
-  // NOTE: Interconnector role has isSystem: true in constants.js, so it's
-  // hidden from WaitingRoom role selection and cannot be tested via UI.
+  { name: 'Smoke_Trader',   roleId: 'TRADER',    roleLabel: 'Trader',            needsAsset: false, assetKey: null },
+  { name: 'Smoke_Supplier', roleId: 'SUPPLIER',  roleLabel: 'Supplier',          needsAsset: false, assetKey: null },
+  { name: 'Smoke_Elexon',   roleId: 'ELEXON',    roleLabel: 'Elexon',            needsAsset: false, assetKey: null },
+  { name: 'Smoke_Gen_OCGT', roleId: 'GENERATOR', roleLabel: 'Generator',         needsAsset: true,  assetKey: 'OCGT' },
+  { name: 'Smoke_BESS_M',   roleId: 'BESS',      roleLabel: 'Battery Storage',   needsAsset: true,  assetKey: 'BESS_M' },
+  { name: 'Smoke_DSR',      roleId: 'DSR',       roleLabel: 'Demand Controller', needsAsset: true,  assetKey: 'DSR' },
 ];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-/**
- * Poll until predicate returns truthy, or throw after timeout.
- */
-async function waitFor(page, predicate, timeout = 30000) {
+async function waitFor(page, predicate, timeout = 30000, arg) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     try {
-      const result = await page.evaluate(predicate);
+      const result = await page.evaluate(predicate, arg);
       if (result) return result;
     } catch { /* page may still be loading */ }
     await sleep(500);
@@ -78,10 +62,7 @@ async function waitFor(page, predicate, timeout = 30000) {
   throw new Error(`waitFor timed out – body: "${snippet}"`);
 }
 
-/**
- * Find and click a visible, enabled button whose text includes `frag`.
- */
-async function clickButton(page, frag, timeout = 10000) {
+async function clickButton(page, frag, timeout = 15000) {
   await page.waitForFunction(
     f => {
       const btn = Array.from(document.querySelectorAll('button:not([disabled])'))
@@ -96,10 +77,6 @@ async function clickButton(page, frag, timeout = 10000) {
   await sleep(300);
 }
 
-/**
- * Type a value into the input matching a placeholder fragment.
- * Uses React-compatible value setter to trigger onChange.
- */
 async function fillInput(page, placeholderFragment, value) {
   await page.waitForFunction(
     (ph, val) => {
@@ -120,219 +97,199 @@ async function fillInput(page, placeholderFragment, value) {
   await sleep(200);
 }
 
-/**
- * Starts the local Gun relay server and waits for it to be ready.
- * Returns the child process object so it can be killed later.
- */
-function startGunRelay() {
-  return new Promise((resolve, reject) => {
-    console.log('  [Setup] Starting local Gun relay server...');
-    const relay = spawn('node', ['gun-relay.cjs'], {
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    let started = false;
-
-    // Listen for the specific startup message
-    relay.stdout.on('data', (data) => {
-      const output = data.toString();
-      if (!started && output.includes('Gun relay server running')) {
-        started = true;
-        console.log('  [Setup] Gun relay server is ready.');
-        resolve(relay);
-      }
-    });
-
-    relay.stderr.on('data', (data) => {
-      const output = data.toString();
-      // Only warn if it's an actual error, not just an axed message etc.
-      if (output.toLowerCase().includes('error')) {
-        console.error('  [Relay Error]', output);
-      }
-    });
-
-    relay.on('error', (err) => {
-      if (!started) reject(err);
-      else console.error('  [Relay Process Error]', err);
-    });
-
-    relay.on('exit', (code) => {
-      if (!started && code !== 0) reject(new Error(`Gun relay exited with code ${code}`));
-    });
-  });
-}
-
-// ─── Main join flow for one role ─────────────────────────────────────────────
-async function joinRole(page, cfg) {
-  const { name, roleLabel, needsAsset, assetName } = cfg;
-  const ROOM = 'SM' + Date.now().toString().slice(-6);
-
-  console.log(`\n[${name}] Room: ${ROOM} | Role: "${roleLabel}"${assetName ? ` | Asset: "${assetName}"` : ''}`);
-
-  // ── STEP 1: Lobby ──
-  await page.goto(BASE_URL, { waitUntil: 'networkidle2' });
-
-  // Wait for lobby to finish loading
+async function enterLobby(page, playerName, roomCode) {
+  await page.goto(BASE_URL, { waitUntil: 'networkidle2', timeout: 30000 });
   await waitFor(page, () =>
-    document.body.textContent.includes('Network Connected') ||
-    document.body.textContent.includes('Connecting') ||
-    document.body.textContent.includes('Network Error') ||
-    document.body.textContent.includes('Join Session'),
-    20000
-  );
+    document.body.textContent.includes('Join Session') ||
+    document.body.textContent.includes('Online') ||
+    document.querySelector('input') !== null
+  , 20000);
 
-  // Fill player name
-  await fillInput(page, 'e.g. Alice', name);
-
-  // Clear room code field and fill
+  await fillInput(page, 'e.g. Alice', playerName);
   await page.evaluate(() => {
     const el = Array.from(document.querySelectorAll('input'))
       .find(i => (i.placeholder || '').includes('ALPHA'));
     if (el) {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype, 'value'
-      ).set;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
       setter.call(el, '');
       el.dispatchEvent(new Event('input', { bubbles: true }));
     }
   });
-  await fillInput(page, 'ALPHA', ROOM);
-
-  // Click "JOIN WAITING ROOM →"
+  await fillInput(page, 'ALPHA', roomCode);
   await clickButton(page, 'JOIN WAITING ROOM');
-  console.log(`[${name}]   ✓ Entered waiting room`);
 
-  // ── STEP 2: Waiting Room — select role ──
   await waitFor(page, () =>
-    Array.from(document.querySelectorAll('button'))
-      .some(b => b.textContent.includes('Generator')),
-    20000
-  );
+    document.body.textContent.includes('PLAYERS IN ROOM') ||
+    document.body.textContent.includes('NESO CONTROL') ||
+    document.body.textContent.includes('WAITING ROOM')
+  , 20000);
+}
 
-  // Click the role button
-  await page.evaluate(label => {
-    const btns = Array.from(document.querySelectorAll('button'));
-    const btn = btns.find(b => b.textContent.includes(label));
-    if (btn) btn.click();
-  }, roleLabel);
-  await sleep(500);
-  console.log(`[${name}]   ✓ Selected role: ${roleLabel}`);
+async function nesoAssignRole(nesoPage, playerName, roleId) {
+  await nesoPage.waitForFunction((pName) => {
+    const card = document.querySelector(`[data-player-name="${pName}"]`);
+    return card && card.querySelector('[data-testid="role-assign-select"]') !== null;
+  }, { timeout: 15000 }, playerName).catch(() => {});
 
-  // ── STEP 3: Click proceed button ──
-  // Since each test is alone in its room, the first joiner is always the host.
-  // Host sees "START GAME →", but for asset roles the WaitingRoom code
-  // may show "SELECT ASSET →" depending on the role's canOwnAssets flag.
-  await page.evaluate(() => {
-    const btns = Array.from(document.querySelectorAll('button'));
-    const start = btns.find(b => b.textContent.includes('START GAME'));
-    const select = btns.find(b => b.textContent.includes('SELECT ASSET'));
-    const join = btns.find(b => b.textContent.includes('JOIN GAME'));
-    if (start) start.click();
-    else if (select) select.click();
-    else if (join) join.click();
+  const ok = await nesoPage.evaluate((pName, rId) => {
+    const card = document.querySelector(`[data-player-name="${pName}"]`);
+    if (!card) return `NO_CARD:${pName}`;
+    const sel = card.querySelector('[data-testid="role-assign-select"]');
+    if (!sel) return 'NO_SELECT';
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(sel, rId);
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    return 'OK';
+  }, playerName, roleId);
+  await sleep(600);
+  return ok;
+}
+
+async function nesoAssignAsset(nesoPage, playerName, assetKey) {
+  await nesoPage.waitForFunction(pName => {
+    const card = document.querySelector(`[data-player-name="${pName}"]`);
+    return card && card.querySelector('[data-testid="asset-assign-select"]') !== null;
+  }, { timeout: 10000 }, playerName).catch(() => {});
+
+  const ok = await nesoPage.evaluate((pName, aKey) => {
+    const card = document.querySelector(`[data-player-name="${pName}"]`);
+    if (!card) return `NO_CARD:${pName}`;
+    const sel = card.querySelector('[data-testid="asset-assign-select"]');
+    if (!sel) return 'NO_ASSET_SELECT';
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(sel, aKey);
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    return 'OK';
+  }, playerName, assetKey);
+  await sleep(600);
+  return ok;
+}
+
+// ─── Main test for one role ──────────────────────────────────────────────────
+async function testRole(cfg) {
+  const { name, roleId, roleLabel, needsAsset, assetKey } = cfg;
+  const ROOM = 'SM' + Date.now().toString().slice(-6);
+
+  console.log(`\n[${name}] Room: ${ROOM} | Role: "${roleLabel}"${assetKey ? ` | Asset: "${assetKey}"` : ''}`);
+
+  const nesoBrowser = await puppeteer.launch({
+    headless: HEADLESS ? 'new' : false,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
-  await sleep(500);
-
-  // ── STEP 4: Asset selection (only for asset-owning roles) ──
-  if (needsAsset && assetName) {
-    console.log(`[${name}]   → Selecting asset: "${assetName}"…`);
-
-    // Wait for asset screen to render
-    await waitFor(page, () =>
-      document.body.textContent.includes("choose the asset you'll operate"),
-      20000
-    );
-
-    // The AssetScreen has a <button> per asset card:
-    //   When not selected: "SELECT OR CONFIGURE {ASSET_NAME_UPPER} →"
-    //   When selected:     "CONFIRM & JOIN SIMULATION →"
-    //
-    // Click 1: "SELECT OR CONFIGURE {NAME} →" — opens the config/edit panel
-    const selectBtnText = 'SELECT OR CONFIGURE ' + assetName.toUpperCase();
-    await clickButton(page, selectBtnText, 15000);
-    await sleep(500);
-
-    // Click 2: "CONFIRM & JOIN SIMULATION →" — confirms and enters game
-    await clickButton(page, 'CONFIRM & JOIN SIMULATION', 15000);
-    await sleep(500);
-    console.log(`[${name}]   ✓ Asset confirmed`);
-  }
-
-  // ── STEP 5: Verify game UI loaded ──
-  await waitFor(page, () => document.body.textContent.includes('/48'), 60000);
-  console.log(`[${name}]   ✓ Game UI loaded (SP indicator visible)`);
-
-  // Quick sanity: top-bar stats present
-  const hasStats = await page.evaluate(() => {
-    const t = document.body.textContent;
-    return t.includes('SBP') || t.includes('NIV') || t.includes('FREQ');
+  const playerBrowser = await puppeteer.launch({
+    headless: HEADLESS ? 'new' : false,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
-  if (hasStats) {
-    console.log(`[${name}]   ✓ Top-bar stats visible`);
+
+  try {
+    const nesoPage = await nesoBrowser.newPage();
+    const playerPage = await playerBrowser.newPage();
+    await nesoPage.setViewport({ width: 1280, height: 800 });
+    await playerPage.setViewport({ width: 1280, height: 800 });
+
+    // ── NESO host joins first ──
+    console.log(`[${name}]   NESO joining room...`);
+    await enterLobby(nesoPage, 'NESO_Host', ROOM);
+    await waitFor(nesoPage, () =>
+      document.body.textContent.includes('NESO CONTROL')
+    , 20000);
+    console.log(`[${name}]   ✓ NESO host confirmed`);
+    await sleep(2000);
+
+    // ── Target role player joins ──
+    console.log(`[${name}]   Player joining room...`);
+    await enterLobby(playerPage, name, ROOM);
+    console.log(`[${name}]   ✓ Player entered waiting room`);
+    await sleep(2000);
+
+    // ── NESO assigns role ──
+    console.log(`[${name}]   NESO assigning role: ${roleId}...`);
+    const roleResult = await nesoAssignRole(nesoPage, name, roleId);
+    if (roleResult !== 'OK') console.warn(`[${name}]   ⚠ Role assign: ${roleResult}`);
+    else console.log(`[${name}]   ✓ Role assigned`);
+
+    // ── NESO assigns asset if needed ──
+    if (needsAsset && assetKey) {
+      console.log(`[${name}]   NESO assigning asset: ${assetKey}...`);
+      await sleep(500);
+      const assetResult = await nesoAssignAsset(nesoPage, name, assetKey);
+      if (assetResult !== 'OK') console.warn(`[${name}]   ⚠ Asset assign: ${assetResult}`);
+      else console.log(`[${name}]   ✓ Asset assigned`);
+    }
+
+    // ── Player clicks READY ──
+    console.log(`[${name}]   Player clicking READY...`);
+    await waitFor(playerPage, () =>
+      document.body.textContent.includes('NOT READY (click to ready)')
+    , 15000);
+    await clickButton(playerPage, 'NOT READY (click to ready)', 10000);
+    await waitFor(playerPage, () => document.body.textContent.includes('\u2713 READY'), 10000);
+    console.log(`[${name}]   ✓ Player READY`);
+    await sleep(1000);
+
+    // ── NESO starts game ──
+    console.log(`[${name}]   NESO starting game...`);
+    await nesoPage.waitForFunction(() => {
+      const btn = Array.from(document.querySelectorAll('button'))
+        .find(b => b.textContent.toUpperCase().includes('START GAME') && !b.disabled);
+      return !!btn;
+    }, { timeout: 15000 });
+    await clickButton(nesoPage, 'START GAME');
+    console.log(`[${name}]   ✓ START GAME clicked`);
+
+    // ── Verify game UI loaded for the player ──
+    console.log(`[${name}]   Waiting for game UI...`);
+    await waitFor(playerPage, () => document.body.textContent.includes('/48'), 60000);
+    console.log(`[${name}]   ✓ Game UI loaded (SP indicator visible)`);
+
+    // Quick sanity: top-bar stats present
+    const hasStats = await playerPage.evaluate(() => {
+      const t = document.body.textContent;
+      return t.includes('SBP') || t.includes('NIV') || t.includes('FREQ');
+    });
+    if (hasStats) {
+      console.log(`[${name}]   ✓ Top-bar stats visible`);
+    }
+
+    return true;
+  } finally {
+    await nesoBrowser.close().catch(() => {});
+    await playerBrowser.close().catch(() => {});
   }
 }
 
 // ─── Main runner ─────────────────────────────────────────────────────────────
 (async () => {
   console.log('══════════════════════════════════════════════════════════');
-  console.log('  GridForge – Role & Asset Smoke Test');
+  console.log('  GridForge – Role & Asset Smoke Test (NESO-Authority)');
   console.log(`  ${TEST_CASES.length} cases | Server: ${BASE_URL} | Headless: ${HEADLESS}`);
   console.log('══════════════════════════════════════════════════════════');
 
-  let gunRelayProcess = null;
   const failed = [];
   const passed = [];
 
-  try {
-    gunRelayProcess = await startGunRelay();
-
-    for (const cfg of TEST_CASES) {
-      const browser = await puppeteer.launch({
-        headless: HEADLESS ? 'new' : false,
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      });
-
-      const page = await browser.newPage();
-      await page.setViewport({ width: 1280, height: 800 });
-
-      try {
-        await joinRole(page, cfg);
-        console.log(`  ✅ ${cfg.name} (${cfg.roleLabel})`);
-        passed.push(cfg.name);
-      } catch (err) {
-        console.error(`  ❌ ${cfg.name} (${cfg.roleLabel}): ${err?.message || err}`);
-        // Save debug screenshot
-        await page.screenshot({
-          path: `test/e2e/debug_${cfg.name}.png`,
-          fullPage: true
-        }).catch(() => { });
-        failed.push({ name: cfg.name, role: cfg.roleLabel, err });
-      } finally {
-        await browser.close().catch(() => { });
-      }
-    }
-
-    // ── Summary ──
-    console.log('\n══════════════════════════════════════════════════════════');
-    if (failed.length === 0) {
-      console.log(`  ✅ All ${TEST_CASES.length} role/asset combos loaded successfully.`);
-    } else {
-      console.log(`  ✅ ${passed.length} passed, ❌ ${failed.length} failed:`);
-      failed.forEach(({ name, role, err }) =>
-        console.error(`    • ${name} (${role}): ${err?.message || err}`)
-      );
-    }
-    console.log('══════════════════════════════════════════════════════════\n');
-
-    process.exit(failed.length > 0 ? 1 : 0);
-
-  } catch (err) {
-    console.error('\nSmoke test crashed:', err?.message || err);
-    process.exit(1);
-  } finally {
-    if (gunRelayProcess) {
-      console.log('  [Cleanup] Shutting down Gun relay server...');
-      gunRelayProcess.kill('SIGKILL');
+  for (const cfg of TEST_CASES) {
+    try {
+      await testRole(cfg);
+      console.log(`  ✅ ${cfg.name} (${cfg.roleLabel})`);
+      passed.push(cfg.name);
+    } catch (err) {
+      console.error(`  ❌ ${cfg.name} (${cfg.roleLabel}): ${err?.message || err}`);
+      failed.push({ name: cfg.name, role: cfg.roleLabel, err });
     }
   }
+
+  // ── Summary ──
+  console.log('\n══════════════════════════════════════════════════════════');
+  if (failed.length === 0) {
+    console.log(`  ✅ All ${TEST_CASES.length} role/asset combos loaded successfully.`);
+  } else {
+    console.log(`  ✅ ${passed.length} passed, ❌ ${failed.length} failed:`);
+    failed.forEach(({ name, role, err }) =>
+      console.error(`    • ${name} (${role}): ${err?.message || err}`)
+    );
+  }
+  console.log('══════════════════════════════════════════════════════════\n');
+
+  process.exit(failed.length > 0 ? 1 : 0);
 })();

@@ -4,6 +4,7 @@ import { SUPPLIERS, SP_DURATION_H } from '../../shared/constants';
 import { Tip } from '../shared/Tip';
 import MarketOverviewPanel from '../shared/MarketOverviewPanel';
 import DAResultsTable from '../shared/DAResultsTable';
+import DAClearingChart from '../shared/DAClearingChart';
 import DACurveSubmission from '../DACurveSubmission';
 
 const f0 = p => Number(p).toLocaleString(undefined, { maximumFractionDigits: 0 });
@@ -280,13 +281,21 @@ export default function SupplierScreen(props) {
             {isDa && (
                 <>
                     {daAlreadyCleared ? (
-                        <DAResultsTable
-                            daAuctionResults={daAuctionResults}
-                            daPositions={daPositions}
-                            positions={positions}
-                            pid={pid}
-                            currentSp={sp}
-                        />
+                        <>
+                            <DAClearingChart
+                                daAuctionResults={daAuctionResults}
+                                pid={pid}
+                                currentSp={sp}
+                            />
+                            <div style={{ height: 8 }} />
+                            <DAResultsTable
+                                daAuctionResults={daAuctionResults}
+                                daPositions={daPositions}
+                                positions={positions}
+                                pid={pid}
+                                currentSp={sp}
+                            />
+                        </>
                     ) : (
                         <>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>

@@ -3,6 +3,7 @@ import SharedLayout from './SharedLayout';
 import { ASSETS, SYSTEM_PARAMS } from '../../shared/constants';
 import { Tip } from '../shared/Tip';
 import DAResultsTable from '../shared/DAResultsTable';
+import DAClearingChart from '../shared/DAClearingChart';
 
 // Formatting
 const f0 = p => Number(p).toLocaleString(undefined, { maximumFractionDigits: 0 });
@@ -159,13 +160,21 @@ export default function DsrScreen(props) {
             {isDa && (
                 <>
                     {daAlreadyCleared ? (
-                        <DAResultsTable
-                            daAuctionResults={daAuctionResults}
-                            daPositions={daPositions}
-                            positions={positions}
-                            pid={pid}
-                            currentSp={sp}
-                        />
+                        <>
+                            <DAClearingChart
+                                daAuctionResults={daAuctionResults}
+                                pid={pid}
+                                currentSp={sp}
+                            />
+                            <div style={{ height: 8 }} />
+                            <DAResultsTable
+                                daAuctionResults={daAuctionResults}
+                                daPositions={daPositions}
+                                positions={positions}
+                                pid={pid}
+                                currentSp={sp}
+                            />
+                        </>
                     ) : (
                         <>
                             <p style={{ fontSize: 9, color: "#4d7a96", marginBottom: 16, lineHeight: 1.5 }}>Schedule future factory demand drops. This creates a virtual generation volume.</p>

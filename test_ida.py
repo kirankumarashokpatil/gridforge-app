@@ -3,7 +3,7 @@ import sys
 
 from engine.game_loop import (
     register_player, generate_market, advance_phase,
-    submit_ida1_bid, submit_ida2_bid, _get_room, _next_phase,
+    submit_ida_bids, _get_room, advance_day_phase,
 )
 from engine.market_engine import ida_forecast, clear_ida
 from engine.constants import IDA_CONFIG, GAME_MODES
@@ -52,12 +52,15 @@ register_player(ROOM, "g1", {"name": "Gen1", "asset": "OCGT", "role": "GENERATOR
 generate_market(ROOM)
 rs = _get_room(ROOM)
 
-phases_seen = [rs["phase"]]
-for _ in range(6):
-    result = advance_phase(ROOM)
+phases_seen = [rs["dayPhase"]]
+# Advance through day-level phases until REALTIME
+for _ in range(5):  # FORECAST→DA→IDA1→IDA2→ID→REALTIME
+    result = advance_day_phase(ROOM)
     phases_seen.append(result["newPhase"])
+    if result["newPhase"] == "REALTIME":
+        break
 
-expected = ["DA", "IDA1", "IDA2", "ID", "BM", "SETTLED", "DA"]
+expected = ["FORECAST", "DA", "IDA1", "IDA2", "ID", "REALTIME"]
 check(f"Phase sequence = {expected}", phases_seen == expected,
       f"got {phases_seen}")
 
@@ -72,13 +75,12 @@ from engine.game_loop import set_room_config
 set_room_config(ROOM_T, {"gameMode": "TUTORIAL"})
 
 rs_t = _get_room(ROOM_T)
-phases_tut = [rs_t["phase"]]
-for _ in range(3):
-    result = advance_phase(ROOM_T)
-    phases_tut.append(result["newPhase"])
+phases_tut = [rs_t["dayPhase"]]
+# TUTORIAL: FORECAST → REALTIME (skips DA/IDA/ID)
+result = advance_day_phase(ROOM_T)
+phases_tut.append(result["newPhase"])
 
-# TUTORIAL only has ["bm"], so: DA→BM→SETTLED→DA
-expected_tut = ["DA", "BM", "SETTLED", "DA"]
+expected_tut = ["FORECAST", "REALTIME"]
 check(f"TUTORIAL sequence = {expected_tut}", phases_tut == expected_tut,
       f"got {phases_tut}")
 
@@ -90,10 +92,11 @@ ROOM2 = "IDA_FC_TEST"
 register_player(ROOM2, "f1", {"name": "FC", "asset": "WIND", "role": "GENERATOR"})
 generate_market(ROOM2)
 rs2 = _get_room(ROOM2)
-market = rs2["market"]
+# Markets are per-SP after day-level refactor
+market = rs2["markets"].get(1, {})
 
-fc_niv = market["forecast"]["niv"]
-ac_niv = market["actual"]["niv"]
+fc_niv = market.get("forecast", {}).get("niv", 0)
+ac_niv = market.get("actual", {}).get("niv", 0)
 
 ida1_fc = ida_forecast(market, 0.4)
 ida2_fc = ida_forecast(market, 0.7)
@@ -119,10 +122,10 @@ ROOM3 = "IDA_BID_TEST"
 register_player(ROOM3, "b1", {"name": "Bidder", "asset": "OCGT", "role": "GENERATOR"})
 generate_market(ROOM3)
 
-r1 = submit_ida1_bid(ROOM3, 1, "b1", {"side": "offer", "mw": 50, "price": 65})
+r1 = submit_ida_bids(ROOM3, "IDA1", "b1", [{"side": "offer", "mw": 50, "price": 65}])
 check("IDA1 bid submitted", r1.get("success") is True)
 
-r2 = submit_ida2_bid(ROOM3, 1, "b1", {"side": "offer", "mw": 30, "price": 70})
+r2 = submit_ida_bids(ROOM3, "IDA2", "b1", [{"side": "offer", "mw": 30, "price": 70}])
 check("IDA2 bid submitted", r2.get("success") is True)
 
 rs3 = _get_room(ROOM3)
@@ -139,16 +142,17 @@ register_player(ROOM4, "c2", {"name": "Buyer", "asset": "OCGT", "role": "SUPPLIE
 generate_market(ROOM4)
 
 # Submit matching IDA1 bids
-submit_ida1_bid(ROOM4, 1, "c1", {"side": "offer", "mw": 30, "price": 55})
-submit_ida1_bid(ROOM4, 1, "c2", {"side": "bid", "mw": 30, "price": 70})
+submit_ida_bids(ROOM4, "IDA1", "c1", [{"side": "offer", "mw": 30, "price": 55}])
+submit_ida_bids(ROOM4, "IDA1", "c2", [{"side": "bid", "mw": 30, "price": 70}])
 
-# Advance to IDA1 and clear
-advance_phase(ROOM4)  # DA → IDA1
+# Advance through FORECAST→DA→IDA1
+advance_day_phase(ROOM4)  # FORECAST → DA
+advance_day_phase(ROOM4)  # DA → IDA1
 rs4 = _get_room(ROOM4)
-check("Phase is IDA1", rs4["phase"] == "IDA1")
+check("Phase is IDA1", rs4["dayPhase"] == "IDA1")
 
 # Advance clears IDA1
-result_ida1 = advance_phase(ROOM4)  # IDA1 → IDA2
+result_ida1 = advance_day_phase(ROOM4)  # IDA1 → IDA2
 
 # Check contract position adjusted
 ps_c1 = rs4["playerStates"]["c1"]

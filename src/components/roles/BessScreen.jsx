@@ -4,6 +4,7 @@ import { ASSETS, SP_DURATION_H, SYSTEM_PARAMS } from '../../shared/constants';
 import { Tip } from '../shared/Tip'; // Added tooltip support
 import DACurveSubmission from '../DACurveSubmission';
 import DAResultsTable from '../shared/DAResultsTable';
+import DAClearingChart from '../shared/DAClearingChart';
 
 // Formatting
 const f0 = p => Number(p).toLocaleString(undefined, { maximumFractionDigits: 0 });
@@ -214,13 +215,21 @@ export default function BessScreen(props) {
             {isDa && (
                 <>
                     {daAlreadyCleared ? (
-                        <DAResultsTable
-                            daAuctionResults={daAuctionResults}
-                            daPositions={daPositions}
-                            positions={positions}
-                            pid={pid}
-                            currentSp={sp}
-                        />
+                        <>
+                            <DAClearingChart
+                                daAuctionResults={daAuctionResults}
+                                pid={pid}
+                                currentSp={sp}
+                            />
+                            <div style={{ height: 8 }} />
+                            <DAResultsTable
+                                daAuctionResults={daAuctionResults}
+                                daPositions={daPositions}
+                                positions={positions}
+                                pid={pid}
+                                currentSp={sp}
+                            />
+                        </>
                     ) : (
                         <>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>

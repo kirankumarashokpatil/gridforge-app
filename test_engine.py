@@ -46,7 +46,7 @@ print("\n7. Testing game_loop...")
 register_player("TEST", "p1", {"name": "Alice", "asset": "BESS_M", "role": "BESS"})
 generate_market("TEST")
 st = get_room_state("TEST")
-print(f"   sp={st['sp']}, phase={st['phase']}, players={len(st['playerStates'])}")
+print(f"   sp={st.get('currentSp', st.get('sp'))}, phase={st.get('dayPhase', st.get('phase'))}, players={len(st['playerStates'])}")
 
 print("\n=== ALL SMOKE TESTS PASSED ===")
 sys.exit(0)

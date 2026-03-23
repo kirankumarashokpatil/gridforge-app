@@ -23,7 +23,7 @@
 const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 
-const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:5174';
+const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:3000';
 const ROOM_CODE = 'WR' + Date.now().toString().slice(-5);
 const HEADLESS = process.env.HEADLESS !== 'false';
 
@@ -229,28 +229,10 @@ async function verifyGameScreen(page, playerName, expectedText, timeout = 30000)
     console.log(`  [${playerName}] ✓ Game screen reached (SP indicator visible)`);
 }
 
-// ─── Gun relay ────────────────────────────────────────────────────────────
+// ─── Gun relay (no longer needed — app uses FastAPI WebSocket) ────────────
 function startGunRelay() {
-    return new Promise((resolve) => {
-        console.log('  [Setup] Starting Gun relay on port 8765...');
-        // Kill any existing process on 8765 (Windows)
-        const kill = spawn('cmd', ['/c', 'for /f "tokens=5" %a in (\'netstat -ano ^| findstr :8765\') do taskkill /F /PID %a'], { stdio: 'ignore', shell: true });
-        kill.on('close', () => {
-            const relay = spawn('node', ['gun-relay.cjs'], { stdio: ['ignore', 'pipe', 'pipe'] });
-            let started = false;
-            relay.stdout.on('data', d => {
-                const txt = d.toString();
-                if (!started && txt.includes('Gun relay server running')) {
-                    started = true;
-                    console.log('  [Setup] Gun relay ready.');
-                    resolve(relay);
-                }
-            });
-            relay.on('error', err => { console.warn('  [Relay] Error:', err.message); if (!started) { started = true; resolve(null); } });
-            relay.on('exit', code => { if (!started) { console.warn('  [Relay] Exited', code); started = true; resolve(null); } });
-            setTimeout(() => { if (!started) { console.warn('  [Relay] Timed out, continuing without relay'); started = true; resolve(relay); } }, 5000);
-        });
-    });
+    console.log('  [Setup] Skipping Gun relay (app uses FastAPI WebSocket)');
+    return Promise.resolve(null);
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────

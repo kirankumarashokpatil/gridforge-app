@@ -193,7 +193,7 @@ export default function SharedLayout({
             {/* ─── PAUSE OVERLAY ─── */}
             {paused && (
                 <div style={{ position: "absolute", top: 44, left: 0, right: 0, zIndex: 9990, background: "#f5b222", padding: "6px 0", textAlign: "center" }}>
-                    <span style={{ fontSize: 12, fontWeight: 800, color: "#050e16", letterSpacing: 1 }}>⏸ GAME PAUSED — Host is discussing</span>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: "#050e16", letterSpacing: 1 }}>⏸ GAME PAUSED — Instructor is discussing</span>
                 </div>
             )}
 

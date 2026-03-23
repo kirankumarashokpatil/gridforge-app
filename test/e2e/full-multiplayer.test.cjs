@@ -27,7 +27,7 @@
 const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 
-const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:5173';
+const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:3000';
 const ROOM_CODE = 'TEST' + Date.now().toString().slice(-6);
 const HEADLESS = process.env.HEADLESS !== 'false';
 
@@ -168,28 +168,11 @@ async function waitForPhase(page, phaseLabel, timeout = 30000) {
 }
 
 /**
- * Starts the Gun relay on port 8765 (kills any existing process first).
- * Resolves with the child process, or null if already running externally.
+ * Gun relay no longer needed — app uses FastAPI WebSocket.
  */
 function startGunRelay() {
-    return new Promise((resolve) => {
-        console.log('  [Setup] Starting Gun relay on port 8765...');
-        const kill = spawn('cmd', ['/c', 'for /f "tokens=5" %a in (\'netstat -ano ^| findstr :8765\') do taskkill /F /PID %a'], { stdio: 'ignore', shell: true });
-        kill.on('close', () => {
-            const relay = spawn('node', ['gun-relay.cjs'], { stdio: ['ignore', 'pipe', 'pipe'] });
-            let started = false;
-            relay.stdout.on('data', d => {
-                if (!started && d.toString().includes('Gun relay server running')) {
-                    started = true;
-                    console.log('  [Setup] Gun relay ready.');
-                    resolve(relay);
-                }
-            });
-            relay.on('error', err => { console.warn('  [Relay] Error:', err.message); if (!started) { started = true; resolve(null); } });
-            relay.on('exit', code => { if (!started) { console.warn('  [Relay] Exited', code, '(may already be running)'); started = true; resolve(null); } });
-            setTimeout(() => { if (!started) { started = true; resolve(relay); } }, 5000);
-        });
-    });
+    console.log('  [Setup] Skipping Gun relay (app uses FastAPI WebSocket)');
+    return Promise.resolve(null);
 }
 
 // ─── NESO-authority waiting room helpers ─────────────────────────────────────

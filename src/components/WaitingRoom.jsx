@@ -22,6 +22,26 @@ export default function WaitingRoom({
     const [copied, setCopied] = useState(false);
     const joinedRef = useRef(false);
 
+    // Normalize a raw player record from DB or broadcast:
+    // - ensure 'id' exists (from player_id)
+    // - ensure 'lastSeen' exists (from last_seen)
+    // - ensure 'assignedAssetKey' synced with 'asset' column
+    const normalizePlayer = (p, prev) => {
+        const id = p.id || p.player_id;
+        const normalized = {
+            ...p,
+            id,
+            lastSeen: p.lastSeen || p.last_seen || 0,
+            assignedAssetKey: p.assignedAssetKey || p.asset || null,
+        };
+        // Preserve transient preference fields from previous state if not in new data
+        if (prev) {
+            if (!normalized.preferredRole && prev.preferredRole) normalized.preferredRole = prev.preferredRole;
+            if (!normalized.preferredAssetKey && prev.preferredAssetKey) normalized.preferredAssetKey = prev.preferredAssetKey;
+        }
+        return normalized;
+    };
+
     // Connect to WebSocket on mount
     useEffect(() => {
         if (!room || joinedRef.current) return;
@@ -34,30 +54,38 @@ export default function WaitingRoom({
         if (api && pid) {
             api.createRoom(room, scenarioId || "BAU")
                 .catch(err => console.warn('[WaitingRoom] createRoom skipped/failed:', err))
-                .then(() => api.putPlayer(room, pid, {
+                .then(() => {
+                    console.log('[WaitingRoom] putPlayer called with name:', JSON.stringify(name), 'pid:', pid, 'room:', room);
+                    return api.putPlayer(room, pid, {
                     name: (name || "").trim(),
                     preferredRole: null,
                     preferredAssetKey: null,
                     lastSeen: Date.now(),
-                }))
+                });
+                })
                 .then(async () => {
                     console.log('[WaitingRoom] Player registered:', { pid, name });
                     // Fetch full player list to populate state (fixes host detection race)
                     try {
                         const allPlayers = await api.getPlayers(room);
                         if (Array.isArray(allPlayers)) {
+                            const normalized = allPlayers.map(p => normalizePlayer(p));
                             // Determine host status immediately from the database truth
-                            const me = allPlayers.find(p => p.player_id === pid);
-                            const otherNamed = allPlayers.filter(p => p.player_id !== pid && p.name);
+                            const me = normalized.find(p => p.id === pid);
+                            const otherNamed = normalized.filter(p => p.id !== pid && p.name);
                             if (!isHost && me?.name && otherNamed.length === 0) {
                                 console.log('[WaitingRoom] Detected as first player from API - setting as host');
                                 setIsHost(true);
                             }
 
-                            if (allPlayers.length > 0 && setPlayers) {
-                                const keyed = {};
-                                allPlayers.forEach(p => { if (p.player_id) keyed[p.player_id] = p; });
-                                setPlayers(prev => ({ ...prev, ...keyed }));
+                            if (normalized.length > 0 && setPlayers) {
+                                setPlayers(prev => {
+                                    const keyed = {};
+                                    normalized.forEach(p => {
+                                        if (p.id) keyed[p.id] = normalizePlayer(p, prev[p.id]);
+                                    });
+                                    return { ...prev, ...keyed };
+                                });
                             }
                         }
                     } catch (err) {
@@ -78,6 +106,31 @@ export default function WaitingRoom({
         }, 5000);
         return () => clearInterval(interval);
     }, [api, room, pid]);
+
+    // Periodic player list polling - ensures host sees all players
+    useEffect(() => {
+        if (!api || !room) return;
+        const poll = async () => {
+            try {
+                const allPlayers = await api.getPlayers(room);
+                if (Array.isArray(allPlayers) && allPlayers.length > 0) {
+                    setPlayers(prev => {
+                        const keyed = {};
+                        allPlayers.forEach(p => {
+                            const id = p.id || p.player_id;
+                            if (id) keyed[id] = normalizePlayer(p, prev[id]);
+                        });
+                        return { ...prev, ...keyed };
+                    });
+                }
+            } catch (err) {
+                // Ignore polling errors
+            }
+        };
+        poll(); // Immediate first poll
+        const interval = setInterval(poll, 4000);
+        return () => clearInterval(interval);
+    }, [api, room]);
 
 
     useEffect(() => {
@@ -109,7 +162,8 @@ export default function WaitingRoom({
     const toggleReady = () => {
         if (!api || !room || !pid) return;
         const me = players[pid];
-        const newReady = !me?.ready;
+        const currentlyReady = me?.ready || me?.status === "READY";
+        const newReady = !currentlyReady;
         api.putPlayer(room, pid, { 
             ready: newReady,
             status: newReady ? "READY" : "ASSIGNED"
@@ -122,19 +176,10 @@ export default function WaitingRoom({
         api.updateRoom(room, {
             roomState: ROOM_STATES.RUNNING,
             sp: 1,
-            phase: "DA",
+            phase: "FORECAST",
             phaseStartTs: now,
             scenarioId,
             paused: false,
-            phaseAuthorityPid: pid,
-            phaseSeq: 1,
-            advancedBy: pid,
-            advancedAt: now,
-            updatedBy: pid,
-            updatedAt: now,
-            timerBy: pid,
-            timerMsLeft: 0,
-            timerPublishedAt: now,
         });
     };
 
@@ -146,7 +191,7 @@ export default function WaitingRoom({
     }, []);
 
     const activePlayers = Object.values(players).filter(
-        p => p && p.name && now - (p.lastSeen || 0) < 120000 // Increased from 60s to 120s
+        p => p && p.name && now - (p.lastSeen || p.last_seen || 0) < 120000 // Increased from 60s to 120s
     );
 
     const roleOptions = Object.values(ROLES).filter(r => !r.isSystem && r.id !== "INSTRUCTOR");
@@ -175,8 +220,8 @@ export default function WaitingRoom({
     const myPreferredRole = isHost ? "NESO" : (myPlayer?.preferredRole || "GENERATOR");
     const myPreferredAssetKey = myPlayer?.preferredAssetKey || "";
     const myAssignedRole = myPlayer?.role;
-    const myAssignedAsset = myPlayer?.assignedAssetKey;
-    const isReady = myPlayer?.ready || false;
+    const myAssignedAsset = myPlayer?.assignedAssetKey || myPlayer?.asset;
+    const isReady = myPlayer?.ready || myPlayer?.status === "READY" || false;
 
     // Ready gate - player can only ready if role assigned (and asset if needed)
     const canPlayerReady = myAssignedRole && myAssignedRole !== "UNASSIGNED" && 
@@ -192,12 +237,13 @@ export default function WaitingRoom({
 
     const allRolesAssigned = activePlayers.length > 0 && activePlayers.every(p => {
         const effectiveRole = (p.id === pid && isHost) ? "NESO" : p.role;
+        const effectiveAsset = p.assignedAssetKey || p.asset;
         return effectiveRole && effectiveRole !== "UNASSIGNED" &&
-            (!ROLE_NEEDS_ASSET(effectiveRole) || !!p.assignedAssetKey);
+            (!ROLE_NEEDS_ASSET(effectiveRole) || !!effectiveAsset);
     });
 
     const allReady = activePlayers.length > 0 && activePlayers.every(p =>
-        (p.id === pid && isHost) ? true : !!p.ready
+        (p.id === pid && isHost) ? true : (!!p.ready || p.status === "READY")
     );
 
     // Advisory: count player-side generation capacity (informational only, not a start gate)
@@ -293,16 +339,16 @@ export default function WaitingRoom({
                                         style={{
                                             flex: 1,
                                             padding: "10px 16px",
-                                            background: myPlayer?.ready ? "#1de98b22" : "#0c1c2a",
-                                            border: `1px solid ${myPlayer?.ready ? "#1de98b" : canPlayerReady ? "#38c0fc44" : "#f5b22244"}`,
+                                            background: isReady ? "#1de98b22" : "#0c1c2a",
+                                            border: `1px solid ${isReady ? "#1de98b" : canPlayerReady ? "#38c0fc44" : "#f5b22244"}`,
                                             borderRadius: 6,
-                                            color: myPlayer?.ready ? "#1de98b" : canPlayerReady ? "#38c0fc" : "#4d7a96",
+                                            color: isReady ? "#1de98b" : canPlayerReady ? "#38c0fc" : "#4d7a96",
                                             fontSize: 12,
                                             fontWeight: 800,
                                             cursor: canPlayerReady ? "pointer" : "not-allowed",
                                         }}
                                     >
-                                        {myPlayer?.ready ? "✓ READY" : canPlayerReady ? "○ NOT READY (click to ready)" : "○ WAITING FOR ASSIGNMENT"}
+                                        {isReady ? "✓ READY" : canPlayerReady ? "○ NOT READY (click to ready)" : "○ WAITING FOR ASSIGNMENT"}
                                     </button>
                                     {!canPlayerReady && (
                                         <div style={{ fontSize: 9, color: "#f5b222", textAlign: "center" }}>
@@ -473,12 +519,12 @@ export default function WaitingRoom({
                                             <div>
                                                 <div style={{ fontSize: 10, fontWeight: 700, color: "#ddeeff" }}>
                                                     {p.name} {isMe ? "(You)" : ""}
-                                                    {p.ready && <span style={{ marginLeft: 6, color: "#1de98b" }}>✓</span>}
+                                                    {(p.ready || p.status === "READY") && <span style={{ marginLeft: 6, color: "#1de98b" }}>✓</span>}
                                                 </div>
                                                 <div style={{ fontSize: 8, color: "#4d7a96" }}>Final: {r.name}</div>
                                                 <div style={{ fontSize: 8, color: "#2a86b8" }}>Preferred: {preferred ? preferred.name : "Not chosen"}</div>
-                                                {p.assignedAssetKey && <div style={{ fontSize: 8, color: "#1de98b" }}>Asset: {ASSETS[p.assignedAssetKey]?.name || p.assignedAssetKey}</div>}
-                                                {!p.assignedAssetKey && p.preferredAssetKey && <div style={{ fontSize: 8, color: "#f5b222" }}>Preferred asset: {ASSETS[p.preferredAssetKey]?.name || p.preferredAssetKey}</div>}
+                                                {(p.assignedAssetKey || p.asset) && <div style={{ fontSize: 8, color: "#1de98b" }}>Asset: {ASSETS[p.assignedAssetKey || p.asset]?.name || p.assignedAssetKey || p.asset}</div>}
+                                                {!(p.assignedAssetKey || p.asset) && p.preferredAssetKey && <div style={{ fontSize: 8, color: "#f5b222" }}>Preferred asset: {ASSETS[p.preferredAssetKey]?.name || p.preferredAssetKey}</div>}
                                             </div>
                                         </div>
 
@@ -495,7 +541,7 @@ export default function WaitingRoom({
                                                             api.putPlayer(room, p.id, {
                                                                 role: newRole,
                                                                 status: newRole === "UNASSIGNED" ? "JOINED" : "ASSIGNED",
-                                                                assignedAssetKey: ROLE_NEEDS_ASSET(newRole) ? (p.assignedAssetKey || p.preferredAssetKey || null) : null,
+                                                                assignedAssetKey: ROLE_NEEDS_ASSET(newRole) ? (p.assignedAssetKey || p.asset || p.preferredAssetKey || null) : null,
                                                                 ready: isHostChange ? true : false,
                                                             });
                                                         }
@@ -514,14 +560,14 @@ export default function WaitingRoom({
                                                 {ROLE_NEEDS_ASSET(p.role) && (() => {
                                     // Filter out assets already taken by other players
                                     const takenAssets = activePlayers
-                                        .filter(other => other.id !== p.id && other.assignedAssetKey)
-                                        .map(other => other.assignedAssetKey);
+                                        .filter(other => other.id !== p.id && (other.assignedAssetKey || other.asset))
+                                        .map(other => other.assignedAssetKey || other.asset);
                                     const availableChoices = assetChoices.filter(a => !takenAssets.includes(a.key));
                                     
                                     return (
                                     <select
                                                         data-testid="asset-assign-select"
-                                                        value={p.assignedAssetKey || ""}
+                                                        value={p.assignedAssetKey || p.asset || ""}
                                                         onChange={(e) => {
                                                             if (api && room) {
                                                                 const isHostChange = p.id === pid;
@@ -581,7 +627,7 @@ export default function WaitingRoom({
                                 </div>
                                 <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 10 }}>
                                     <span style={{ color: allReady ? "#1de98b" : "#f5b222" }}>{allReady ? "✓" : "○"}</span>
-                                    <span style={{ color: allReady ? "#1de98b" : "#ddeeff" }}>All players ready ({activePlayers.filter(p => p.ready).length}/{activePlayers.length})</span>
+                                    <span style={{ color: allReady ? "#1de98b" : "#ddeeff" }}>All players ready ({activePlayers.filter(p => p.ready || p.status === "READY").length}/{activePlayers.length})</span>
                                 </div>
                                 <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 10 }}>
                                     <span style={{ color: totalGenCapacity > 0 ? "#1de98b" : "#4d7a96" }}>{totalGenCapacity > 0 ? "✓" : "○"}</span>

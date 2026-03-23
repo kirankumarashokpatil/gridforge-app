@@ -4,6 +4,7 @@ import { ASSETS, SP_DURATION_H, SYSTEM_PARAMS } from '../../shared/constants';
 import { Tip } from '../shared/Tip'; // Added tooltips
 import DACurveSubmission from '../DACurveSubmission';
 import DAResultsTable from '../shared/DAResultsTable';
+import DAClearingChart from '../shared/DAClearingChart';
 
 // Formatting
 const f0 = p => Number(p).toLocaleString(undefined, { maximumFractionDigits: 0 });
@@ -229,14 +230,22 @@ export default function GeneratorScreen(props) {
             {isDa && (
                 <>
                     {daAlreadyCleared ? (
-                        /* DA already cleared for all 48 SPs — show per-SP results table */
-                        <DAResultsTable
-                            daAuctionResults={daAuctionResults}
-                            daPositions={daPositions}
-                            positions={positions}
-                            pid={pid}
-                            currentSp={sp}
-                        />
+                        /* DA already cleared for all 48 SPs — show chart + per-SP results table */
+                        <>
+                            <DAClearingChart
+                                daAuctionResults={daAuctionResults}
+                                pid={pid}
+                                currentSp={sp}
+                            />
+                            <div style={{ height: 8 }} />
+                            <DAResultsTable
+                                daAuctionResults={daAuctionResults}
+                                daPositions={daPositions}
+                                positions={positions}
+                                pid={pid}
+                                currentSp={sp}
+                            />
+                        </>
                     ) : (
                         /* DA not yet cleared — show submission UI */
                         <>

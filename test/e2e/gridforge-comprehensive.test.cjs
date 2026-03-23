@@ -46,7 +46,7 @@ const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
-const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:5173';
+const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:3000';
 const ROOM_CODE = 'COMP' + Date.now().toString().slice(-6);
 const HEADLESS = process.env.HEADLESS !== 'false';
 const SLOW_MO = parseInt(process.env.SLOW_MO || '0', 10);
@@ -221,24 +221,10 @@ async function selectTab(page, tabLabel) {
     await sleep(300);
 }
 
-// ─── Gun relay (robust: kills existing, fallback to already-running) ────────────────
+// ─── Gun relay (no longer needed — app uses FastAPI WebSocket) ─────────────────
 function startGunRelay() {
-    return new Promise((resolve) => {
-        console.log('  [Setup] Starting Gun relay on port 8765...');
-        const kill = spawn('cmd', ['/c', 'for /f "tokens=5" %a in (\'netstat -ano ^| findstr :8765\') do taskkill /F /PID %a'], { stdio: 'ignore', shell: true });
-        kill.on('close', () => {
-            const relay = spawn('node', ['gun-relay.cjs'], { stdio: ['ignore', 'pipe', 'pipe'] });
-            let started = false;
-            relay.stdout.on('data', d => {
-                if (!started && d.toString().includes('Gun relay server running')) {
-                    started = true; console.log('  [Setup] Gun relay ready.'); resolve(relay);
-                }
-            });
-            relay.on('error', err => { if (!started) { started = true; console.warn('  [Relay] Error:', err.message); resolve(null); } });
-            relay.on('exit', code => { if (!started) { started = true; console.warn('  [Relay] Exited', code, '(may already be running)'); resolve(null); } });
-            setTimeout(() => { if (!started) { started = true; resolve(relay); } }, 5000);
-        });
-    });
+    console.log('  [Setup] Skipping Gun relay (app uses FastAPI WebSocket)');
+    return Promise.resolve(null);
 }
 
 // ─── NESO-authority waiting room helpers ───────────────────────────────────

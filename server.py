@@ -312,7 +312,9 @@ async def update_room_meta(room_id: str, data: Dict[str, Any]):
         }
         
         for key, value in data.items():
-            field = field_map.get(key, key)
+            field = field_map.get(key)
+            if field is None:
+                continue  # Skip unknown fields instead of using raw key as column
             if value is not None:
                 updates.append(f"{field} = ${idx}")
                 values.append(value)
@@ -344,52 +346,117 @@ async def get_players(room_id: str):
             "SELECT * FROM players WHERE room_id = $1 ORDER BY created_at",
             room_id
         )
-        return [dict(row) for row in result]
+        players = []
+        for row in result:
+            p = dict(row)
+            p["id"] = p.get("player_id")  # Add 'id' alias for frontend compatibility
+            players.append(p)
+        return players
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/rooms/{room_id}/players/{player_id}")
 async def put_player(room_id: str, player_id: str, data: Dict[str, Any]):
-    """Create or update player"""
+    """Create or update player (partial update - only fields present in data are changed)"""
     try:
-        sql = '''
-            INSERT INTO players 
-            (player_id, room_id, name, asset, role, custom_config, cash, da_cash, sof, status, last_seen)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            ON CONFLICT (player_id, room_id) DO UPDATE SET
-            name = EXCLUDED.name,
-            asset = EXCLUDED.asset,
-            role = EXCLUDED.role,
-            custom_config = EXCLUDED.custom_config,
-            cash = EXCLUDED.cash,
-            da_cash = EXCLUDED.da_cash,
-            sof = EXCLUDED.sof,
-            status = EXCLUDED.status,
-            last_seen = EXCLUDED.last_seen,
-            role_score = COALESCE(EXCLUDED.role_score, players.role_score),
-            system_score = COALESCE(EXCLUDED.system_score, players.system_score),
-            overall_score = COALESCE(EXCLUDED.overall_score, players.overall_score),
-            updated_at = CURRENT_TIMESTAMP
-        '''
-        
-        await db.execute(
-            sql,
-            player_id,
-            room_id,
-            data.get("name"),
-            data.get("asset"),
-            data.get("role"),
-            json.dumps(data.get("custom_config", {})),
-            data.get("cash", 0),
-            data.get("da_cash", 0),
-            data.get("sof", 50),
-            data.get("status", "UNASSIGNED"),
-            int(datetime.now().timestamp() * 1000)
+        now_ts = int(datetime.now().timestamp() * 1000)
+
+        # Check if player already exists
+        existing = await db.query(
+            "SELECT * FROM players WHERE player_id = $1 AND room_id = $2",
+            player_id, room_id
         )
-        
+
+        if not existing:
+            # INSERT new player with provided fields + defaults
+            sql = '''
+                INSERT INTO players 
+                (player_id, room_id, name, asset, role, custom_config, cash, da_cash, sof, status, last_seen)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            '''
+            await db.execute(
+                sql,
+                player_id,
+                room_id,
+                data.get("name"),
+                data.get("asset"),
+                data.get("role"),
+                json.dumps(data.get("custom_config", {})),
+                data.get("cash", 0),
+                data.get("da_cash", 0),
+                data.get("sof", 50),
+                data.get("status", "UNASSIGNED"),
+                now_ts
+            )
+        else:
+            # PARTIAL UPDATE - only update fields actually provided in data
+            field_map = {
+                "name": "name",
+                "asset": "asset",
+                "role": "role",
+                "custom_config": "custom_config",
+                "cash": "cash",
+                "da_cash": "da_cash",
+                "sof": "sof",
+                "status": "status",
+                "lastSeen": "last_seen",
+                "last_seen": "last_seen",
+                "ready": "status",  # ready flag maps to status
+                "assignedAssetKey": "asset",
+            }
+
+            updates = []
+            values = []
+            idx = 1
+
+            for key, value in data.items():
+                col = field_map.get(key)
+                if col is None:
+                    continue  # skip unknown fields
+                # Special handling for custom_config (serialize to JSON)
+                if key == "custom_config":
+                    value = json.dumps(value or {})
+                # Special handling: don't overwrite name/role with None on partial updates
+                if key in ("name", "role", "asset") and value is None:
+                    continue
+                # Special handling for ready flag: maps to status field
+                if key == "ready":
+                    # Don't overwrite status if 'status' is also in data
+                    if "status" in data:
+                        continue
+                    value = "READY" if value else "ASSIGNED"
+                updates.append(f"{col} = ${idx}")
+                values.append(value)
+                idx += 1
+
+            # Always update last_seen and updated_at
+            updates.append(f"last_seen = ${idx}")
+            values.append(now_ts)
+            idx += 1
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+
+            if updates:
+                values.append(player_id)
+                values.append(room_id)
+                sql = f"UPDATE players SET {', '.join(updates)} WHERE player_id = ${idx} AND room_id = ${idx + 1}"
+                await db.execute(sql, *values)
+
+        # Fetch the full current player record to broadcast
+        updated = await db.query(
+            "SELECT * FROM players WHERE player_id = $1 AND room_id = $2",
+            player_id, room_id
+        )
+        player_record = dict(updated[0]) if updated else {"player_id": player_id}
+        # Add 'id' alias for frontend compatibility  
+        player_record["id"] = player_record.get("player_id", player_id)
+        # Preserve non-DB fields from request (preferences) for frontend display
+        for extra_key in ("preferredRole", "preferredAssetKey", "ready", "assignedAssetKey"):
+            if extra_key in data:
+                player_record[extra_key] = data[extra_key]
+
         await manager.broadcast_to_room(room_id, {
             "type": "players",
-            "data": {"player_id": player_id, "name": data.get("name"), "status": data.get("status")}
+            "data": {player_id: player_record}
         })
         
         return {"success": True, "player_id": player_id}
@@ -669,7 +736,15 @@ async def engine_advance_day_phase(room_id: str):
             "UPDATE rooms SET phase = $1, sp = $2, last_active = CURRENT_TIMESTAMP WHERE room_id = $3",
             rs["dayPhase"], rs["currentSp"], room_id
         )
-        await manager.broadcast_to_room(room_id, {"type": "day_phase_change", "data": result})
+        # Ensure the broadcast includes fields the client expects
+        broadcast_data = {
+            **result,
+            "dayPhase": rs["dayPhase"],
+            "currentSp": rs["currentSp"],
+            "bmSubPhase": rs["bmSubPhase"],
+            "phaseStartTs": int(datetime.now().timestamp() * 1000),
+        }
+        await manager.broadcast_to_room(room_id, {"type": "day_phase_change", "data": broadcast_data})
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -686,7 +761,15 @@ async def engine_advance_bm(room_id: str):
             rs["dayPhase"], rs["currentSp"], room_id
         )
 
-        await manager.broadcast_to_room(room_id, {"type": "bm_advance", "data": result})
+        # Ensure the broadcast includes fields the client expects
+        broadcast_data = {
+            **result,
+            "dayPhase": rs["dayPhase"],
+            "currentSp": rs["currentSp"],
+            "bmSubPhase": rs["bmSubPhase"],
+            "phaseStartTs": int(datetime.now().timestamp() * 1000),
+        }
+        await manager.broadcast_to_room(room_id, {"type": "bm_advance", "data": broadcast_data})
 
         # Broadcast server settlement for client-side logging/validation
         # (client computes its own authoritative cash and persists via putPlayer)
