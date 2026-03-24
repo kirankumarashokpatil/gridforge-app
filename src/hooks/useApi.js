@@ -38,7 +38,10 @@ export function useApi() {
 
   // Connect to WebSocket for real-time updates
   const connect = useCallback((room) => {
-    if (!room || wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (!room) return;
+    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
     
     roomRef.current = room;
     const ws = new WebSocket(`${WS_BASE}/ws?room=${encodeURIComponent(room)}`);
@@ -106,6 +109,7 @@ export function useApi() {
     
     ws.onclose = () => {
       console.log('[WebSocket] Disconnected');
+      wsRef.current = null;
       // Auto-reconnect after 3 seconds
       setTimeout(() => connect(room), 3000);
     };

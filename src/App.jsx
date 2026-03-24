@@ -355,6 +355,7 @@ export default function App() {
 
     // Polling fallback: if WebSocket doesn't deliver roomState: RUNNING, poll REST
     let roomStatePoll = null;
+    let forecastPoll = null;
     if (screen === 'waiting_room') {
       roomStatePoll = setInterval(async () => {
         try {
@@ -368,12 +369,30 @@ export default function App() {
       }, 2000);
     }
 
+    // Forecast visibility fallback: keep forecasts/published forecast in sync
+    // even if websocket delivery is delayed or missed.
+    forecastPoll = setInterval(async () => {
+      try {
+        const fc = await api.engineGetForecasts(room);
+        if (fc?.forecasts) setForecasts(fc.forecasts);
+      } catch (_) {
+        // Ignore polling errors
+      }
+      try {
+        const state = await api.engineGetState(room);
+        if (state?.publishedForecast) setPublishedForecast(state.publishedForecast);
+      } catch (_) {
+        // Ignore polling errors
+      }
+    }, 3000);
+
     return () => {
       unsubPlayers?.();
       unsubMeta?.();
       unsubForecast?.();
       unsubSpContracts?.();
       if (roomStatePoll) clearInterval(roomStatePoll);
+      if (forecastPoll) clearInterval(forecastPoll);
     };
   }, [screen, room, api, subscribe]);
 
