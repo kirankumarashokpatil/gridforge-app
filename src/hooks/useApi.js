@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-const DEFAULT_API_BASE = `${window.location.protocol}//${window.location.hostname}:8000`;
+const _isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+const DEFAULT_API_BASE = _isLocal
+  ? `${window.location.protocol}//${window.location.hostname}:8000`
+  : window.location.origin;
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE).replace(/\/$/, '');
 const WS_BASE = (import.meta.env.VITE_WS_BASE_URL || API_BASE.replace(/^http/, 'ws')).replace(/\/$/, '');
 
