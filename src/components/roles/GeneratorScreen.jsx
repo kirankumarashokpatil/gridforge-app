@@ -5,6 +5,7 @@ import { Tip } from '../shared/Tip'; // Added tooltips
 import DACurveSubmission from '../DACurveSubmission';
 import DAResultsTable from '../shared/DAResultsTable';
 import DAClearingChart from '../shared/DAClearingChart';
+import ForecastUpdateBanner from '../shared/ForecastUpdateBanner';
 
 // Formatting
 const f0 = p => Number(p).toLocaleString(undefined, { maximumFractionDigits: 0 });
@@ -229,6 +230,7 @@ export default function GeneratorScreen(props) {
 
             {isDa && (
                 <>
+                    <ForecastUpdateBanner forecastUpdateSummary={props.forecastUpdateSummary} compact />
                     {daAlreadyCleared ? (
                         /* DA already cleared for all 48 SPs — show chart + per-SP results table */
                         <>

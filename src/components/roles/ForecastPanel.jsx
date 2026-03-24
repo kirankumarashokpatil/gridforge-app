@@ -4,7 +4,7 @@ import { roomKey } from '../../shared/utils';
 
 const f0 = p => Number(p).toLocaleString(undefined, { maximumFractionDigits: 0 });
 
-export default function ForecastPanel({ sp, tickSpeed, publishedForecast, isInstructor, canEdit = false, onPublish, gun, room }) {
+export default function ForecastPanel({ sp, tickSpeed, publishedForecast, isInstructor, canEdit = false, onPublish, gun, room, forecastUpdateSummary, phase }) {
     const [engine] = useState(() => new ForecastEngine());
     const [mode, setMode] = useState('manual');
     const [skill, setSkill] = useState(0.8);
@@ -227,6 +227,111 @@ export default function ForecastPanel({ sp, tickSpeed, publishedForecast, isInst
             {!canEdit && (
                 <div style={{ marginTop: 16, fontSize: 10, color: "#4d7a96", background: "#0c1c2a", padding: 8, borderRadius: 4 }}>
                     NESO Operator: You are viewing the live published forecast. The Instructor controls the generation mode.
+                </div>
+            )}
+
+            {/* ── Forecast Update Bulletin ── */}
+            {/* Shown whenever a new forecast phase has produced a weather-run update.
+                Mirrors the real GB trader experience: each forecast phase is triggered
+                by a new NWP model run (06Z / 12Z / 06Z short-range) and gives players
+                information to revise their DA/IDA/ID positions before the next gate. */}
+            {forecastUpdateSummary && forecastUpdateSummary.stage !== "FORECAST_0" && (
+                <div style={{
+                    marginTop: 12,
+                    background: "#061a10",
+                    border: "1px solid #1de98b44",
+                    borderLeft: "3px solid #1de98b",
+                    borderRadius: 6,
+                    padding: "10px 12px",
+                }}>
+                    {/* Header */}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{
+                                fontSize: 9, fontWeight: 700, padding: "2px 6px",
+                                background: "#1de98b22", border: "1px solid #1de98b55",
+                                borderRadius: 3, color: "#1de98b", letterSpacing: 0.5,
+                            }}>
+                                {forecastUpdateSummary.weatherRun} RUN
+                            </span>
+                            <span style={{ fontSize: 10, fontWeight: 700, color: "#1de98b", letterSpacing: 0.08 }}>
+                                FORECAST UPDATE — {forecastUpdateSummary.stage}
+                            </span>
+                        </div>
+                        {forecastUpdateSummary.confidenceGain > 0 && (
+                            <span style={{ fontSize: 9, color: "#94a3b8" }}>
+                                Uncertainty reduced by {forecastUpdateSummary.confidenceGain}%
+                            </span>
+                        )}
+                    </div>
+
+                    {/* Trigger narrative */}
+                    <div style={{ fontSize: 11, color: "#c8e6f0", marginBottom: 8, lineHeight: 1.5 }}>
+                        {forecastUpdateSummary.trigger}
+                    </div>
+
+                    {/* Key stats row */}
+                    <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                        {forecastUpdateSummary.windDeltaGW !== undefined && forecastUpdateSummary.windDeltaGW !== 0 && (
+                            <div>
+                                <div style={{ fontSize: 8, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5 }}>Wind Revised</div>
+                                <div style={{
+                                    fontSize: 13, fontFamily: "'JetBrains Mono', monospace", fontWeight: 800,
+                                    color: forecastUpdateSummary.windDeltaGW < 0 ? "#f0455a" : "#1de98b",
+                                }}>
+                                    {forecastUpdateSummary.windDeltaGW > 0 ? "+" : ""}{forecastUpdateSummary.windDeltaGW.toFixed(1)} GW
+                                </div>
+                                <div style={{ fontSize: 8, color: "#475569" }}>
+                                    {forecastUpdateSummary.windDeltaGW < 0 ? "→ system tighter" : "→ system looser"}
+                                </div>
+                            </div>
+                        )}
+                        {forecastUpdateSummary.demandDeltaMW !== undefined && forecastUpdateSummary.demandDeltaMW !== 0 && (
+                            <div>
+                                <div style={{ fontSize: 8, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5 }}>Demand Revised</div>
+                                <div style={{
+                                    fontSize: 13, fontFamily: "'JetBrains Mono', monospace", fontWeight: 800,
+                                    color: forecastUpdateSummary.demandDeltaMW > 0 ? "#f5b222" : "#1de98b",
+                                }}>
+                                    {forecastUpdateSummary.demandDeltaMW > 0 ? "+" : ""}{forecastUpdateSummary.demandDeltaMW} MW
+                                </div>
+                            </div>
+                        )}
+                        {forecastUpdateSummary.daAvgPrice != null && (
+                            <div>
+                                <div style={{ fontSize: 8, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5 }}>DA Avg Cleared</div>
+                                <div style={{ fontSize: 13, fontFamily: "'JetBrains Mono', monospace", fontWeight: 800, color: "#f5b222" }}>
+                                    £{forecastUpdateSummary.daAvgPrice}/MWh
+                                </div>
+                                {forecastUpdateSummary.daPriceSignal && (
+                                    <div style={{
+                                        fontSize: 8,
+                                        color: forecastUpdateSummary.daPriceSignal === "TIGHTER" ? "#f0455a"
+                                            : forecastUpdateSummary.daPriceSignal === "LOOSER" ? "#1de98b"
+                                            : "#94a3b8",
+                                    }}>
+                                        {forecastUpdateSummary.daPriceSignal}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        {forecastUpdateSummary.spTightest != null && (
+                            <div>
+                                <div style={{ fontSize: 8, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5 }}>Tightest SP</div>
+                                <div style={{ fontSize: 13, fontFamily: "'JetBrains Mono', monospace", fontWeight: 800, color: "#f0455a" }}>
+                                    SP {forecastUpdateSummary.spTightest}
+                                </div>
+                                <div style={{ fontSize: 8, color: "#475569" }}>after revision</div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Action hint */}
+                    <div style={{ marginTop: 8, fontSize: 9, color: "#64748b", borderTop: "1px solid #1a3045", paddingTop: 6 }}>
+                        {forecastUpdateSummary.stage === "FORECAST_1"
+                            ? "▶ IDA1 gate opens at 17:00 D\u20111 — use this update to refine your positions for all 48 SPs before 17:30."
+                            : "▶ IDA2 gate opens at 08:00 D — use this sharp update to make final position adjustments for remaining SPs."}
+                    </div>
                 </div>
             )}
         </div>

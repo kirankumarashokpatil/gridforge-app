@@ -112,6 +112,7 @@ export default function App() {
   const [spHistory, setSpHistory] = useState([]);
   const [forecasts, setForecasts] = useState([]);
   const [publishedForecast, setPublishedForecast] = useState(null); // Shared NESO forecast version
+  const [forecastUpdateSummary, setForecastUpdateSummary] = useState(null); // Latest weather-run bulletin
   const [roomScenario, setRoomScenario] = useState("NORMAL");
   const [spContracts, setSpContracts] = useState({}); // Master ledger for Elexon settlement
 
@@ -243,6 +244,7 @@ export default function App() {
         if (state.spHistory) setSpHistory(state.spHistory);
         if (state.forecasts) setForecasts(state.forecasts);
         if (state.publishedForecast) setPublishedForecast(state.publishedForecast);
+        if (state.forecastUpdateSummary) setForecastUpdateSummary(state.forecastUpdateSummary);
         if (state.roomScenario) setRoomScenario(state.roomScenario);
         if (state.spContracts) setSpContracts(state.spContracts);
         if (state.market) setMarket(state.market);
@@ -381,6 +383,7 @@ export default function App() {
       try {
         const state = await api.engineGetState(room);
         if (state?.publishedForecast) setPublishedForecast(state.publishedForecast);
+        if (state?.forecastUpdateSummary) setForecastUpdateSummary(state.forecastUpdateSummary);
       } catch (_) {
         // Ignore polling errors
       }
@@ -1532,6 +1535,7 @@ export default function App() {
       onTickSpeedChange: instructorSetSpeed, onPauseToggle: instructorTogglePause, onNextPhase: instructorNextPhase,
       onExecuteEvent: instructorTrigger, onScenarioChange: instructorSetScenario, soc, players,
       onForecastPublish: publishForecast,
+      forecastUpdateSummary,
       physicalState, setPhysicalState,
       // ─── Scoring Engine data ───
       playerScores, leaderboardData, systemState, overallScoreHistory,

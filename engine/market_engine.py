@@ -515,6 +515,128 @@ def ida_forecast(market: dict, error_reduction: float) -> dict:
     }
 
 
+# ─── Weather model-run constants (UK Met Office / GFS run times) ───
+
+# Each GB forecast phase is triggered by a specific NWP model run time.
+# Matches real EPEX/N2EX trader workflow:
+#   DA:       last good run before 09:20 gate = 06Z (D-1)
+#   FORECAST_1: 12Z run arrives ~15:00 D-1, used before IDA1 (17:30 gate)
+#   FORECAST_2: 06Z short-range run D-day, used before IDA2 (08:00 gate)
+_WEATHER_RUN_FOR_STAGE = {
+    "FORECAST_0": "06Z",
+    "FORECAST_1": "12Z",
+    "FORECAST_2": "06Z (short-range)",
+}
+
+# Max peak-hour wind revision in GW (± either way) per stage.
+# Real GB: 12Z can move evening wind ±1–3 GW; morning 06Z smaller.
+_WIND_REVISION_GW = {
+    "FORECAST_1": 2.0,
+    "FORECAST_2": 0.8,
+}
+
+
+def generate_forecast_update(
+    markets: dict,
+    stage: str,
+    scenario_id: str,
+    da_avg_price: float | None = None,
+) -> dict:
+    """
+    Produce the forecast-update bulletin shown to all players when entering a
+    FORECAST_1 or FORECAST_2 phase.
+
+    Mirrors real GB trader workflow:
+      FORECAST_1 (~09:30 D-1): 12Z weather run + DA clearing price as signal.
+      FORECAST_2 (~07:30 D):   06Z short-range run — sharpest pre-delivery update.
+
+    Returns a dict with:
+        stage, weatherRun, trigger, windDeltaGW, demandDeltaMW,
+        daAvgPrice, daPriceSignal, confidenceGain, spTightest, perSpRevisions
+    """
+    weather_run = _WEATHER_RUN_FOR_STAGE.get(stage, "12Z")
+    max_wind_gw = _WIND_REVISION_GW.get(stage, 1.0)
+
+    # Deterministic-but-varied wind revision (seeded on stage + market count).
+    seed = (hash(stage) ^ (len(markets) * 31337)) & 0xFFFFFFFF
+    rng = _rng(seed)
+
+    wind_delta_gw = round((rng() - 0.5) * 2.0 * max_wind_gw, 2)
+    demand_delta_mw = round((rng() - 0.5) * 350.0)
+
+    # DA price signal: compare cleared price vs mid-day forecast baseline.
+    da_price_signal: str | None = None
+    if da_avg_price is not None and markets:
+        sample_sps = [sp for sp in [20, 24, 28, 32, 36] if sp in markets]
+        if sample_sps:
+            avg_fc_sbp = sum(
+                markets[sp]["forecast"].get("sbp", 50) for sp in sample_sps
+            ) / len(sample_sps)
+            diff = da_avg_price - avg_fc_sbp
+            if diff > 5:
+                da_price_signal = "TIGHTER"    # cleared above forecast → more short
+            elif diff < -5:
+                da_price_signal = "LOOSER"     # cleared below forecast → more long
+            else:
+                da_price_signal = "AS EXPECTED"
+
+    # Per-SP revision summary (wind revisions scale with each SP's wind fraction).
+    per_sp_revisions: dict[str, dict] = {}
+    rng2 = _rng(seed ^ 0xDEADC0DE)
+    for sp, market in sorted(markets.items()):
+        wf = market.get("forecast", {}).get("wf", 0.0)
+        sp_wind_delta_mw = round(wind_delta_gw * 1000.0 * (0.4 + wf * 1.2))
+        sp_demand_delta = round(demand_delta_mw * 0.9 + (rng2() - 0.5) * 80.0)
+        sp_niv_delta = -(sp_wind_delta_mw + sp_demand_delta)
+        per_sp_revisions[str(sp)] = {
+            "windDeltaMW": sp_wind_delta_mw,
+            "demandDeltaMW": sp_demand_delta,
+            "nivDelta": sp_niv_delta,
+        }
+
+    # SP where system is most tightened after revision.
+    sp_tightest: int | None = None
+    if per_sp_revisions:
+        sp_tightest = int(
+            min(per_sp_revisions.items(), key=lambda kv: kv[1]["nivDelta"])[0]
+        )
+
+    # Human-readable trigger string.
+    direction_word = "cut" if wind_delta_gw < 0 else "added"
+    abs_wind = abs(wind_delta_gw)
+    if stage == "FORECAST_1":
+        parts = [f"{weather_run} weather run — wind {direction_word} {abs_wind:.1f} GW"]
+        if da_avg_price is not None:
+            parts.append(f"DA cleared £{da_avg_price:.1f}/MWh")
+        if da_price_signal and da_price_signal != "AS EXPECTED":
+            parts.append(f"system {da_price_signal.lower()} than forecast")
+        trigger = " · ".join(parts)
+    elif stage == "FORECAST_2":
+        sign = "+" if demand_delta_mw >= 0 else ""
+        trigger = (
+            f"{weather_run} — wind {direction_word} {abs_wind:.1f} GW"
+            f" · demand revised {sign}{demand_delta_mw:.0f} MW"
+            " · high confidence pre-IDA2 update"
+        )
+    else:
+        trigger = f"{weather_run} run · initial DA forecast — full ±uncertainty"
+
+    confidence_gain = {"FORECAST_1": 40, "FORECAST_2": 70}.get(stage, 0)
+
+    return {
+        "stage": stage,
+        "weatherRun": weather_run,
+        "trigger": trigger,
+        "windDeltaGW": wind_delta_gw,
+        "demandDeltaMW": demand_delta_mw,
+        "daAvgPrice": da_avg_price,
+        "daPriceSignal": da_price_signal,
+        "confidenceGain": confidence_gain,
+        "spTightest": sp_tightest,
+        "perSpRevisions": per_sp_revisions,
+    }
+
+
 def clear_ida(bids: list[dict], ida_forecast_data: dict) -> dict:
     """
     Clear an Intraday Auction (IDA1 or IDA2).

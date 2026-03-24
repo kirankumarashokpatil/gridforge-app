@@ -5,6 +5,7 @@ import { SYSTEM_PARAMS, ROLES } from '../../shared/constants';
 import MarketOverviewPanel from '../shared/MarketOverviewPanel';
 import EventFeed from '../shared/EventFeed';
 import DACurveSubmission from '../DACurveSubmission';
+import ForecastUpdateBanner from '../shared/ForecastUpdateBanner';
 
 const f0 = p => Number(p).toLocaleString(undefined, { maximumFractionDigits: 0 });
 
@@ -204,6 +205,7 @@ export default function TraderScreen(props) {
             <Panel bg="#08141f" style={{ flex: 1, display: "flex", overflow: "hidden" }}>
                 {tab === "DA" && (
                     <>
+                        <ForecastUpdateBanner forecastUpdateSummary={props.forecastUpdateSummary} compact />
                         <div style={{ flexShrink: 0 }}>
                             <h4 style={{ fontSize: 12, color: "#f5b222", marginBottom: 4, letterSpacing: 1 }}>📈 INITIAL SPECULATION</h4>
                             <p style={{ fontSize: 9, color: "#4d7a96", marginBottom: 16, lineHeight: 1.4 }}>Take a purely financial view on the market before physical delivery.</p>

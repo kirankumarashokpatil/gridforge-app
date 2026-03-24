@@ -37,7 +37,7 @@ from .constants import (
 )
 from .market_engine import (
     market_for_sp, clear_bm, clear_da, clear_ida, ida_forecast,
-    feedback_market_state, compute_forecasts,
+    feedback_market_state, compute_forecasts, generate_forecast_update,
 )
 from .asset_physics import init_sof, supplier_demand_mw
 from .scoring_engine import compute_role_score, compute_system_score, compute_overall_score
@@ -141,6 +141,14 @@ def _new_room_state() -> dict:
         # Forecast
         "forecastEngine": ForecastEngine(),
         "publishedForecast": None,
+
+        # Forecast update bulletins shown to all players between phases.
+        # Each entry produced by generate_forecast_update(); last 10 kept.
+        # Maps directly to real GB weather-model-run cadence:
+        #   FORECAST_0 → 06Z initial run (D-1 06:00)
+        #   FORECAST_1 → 12Z run (D-1 after DA 09:30)
+        #   FORECAST_2 → 06Z short-range run (D 07:30)
+        "forecastUpdateHistory": [],
     }
 
 
@@ -168,6 +176,14 @@ def get_room_state(room_id: str) -> dict:
         "spSettlements": rs["spSettlements"],
         "publishedForecast": rs.get("publishedForecast"),
         "forecasts": forecasts,
+        # Last 3 forecast update bulletins for the timeline panel
+        "forecastUpdateHistory": rs.get("forecastUpdateHistory", [])[-3:],
+        # Most recent update (convenient for single-banner display)
+        "forecastUpdateSummary": (
+            rs["forecastUpdateHistory"][-1]
+            if rs.get("forecastUpdateHistory")
+            else None
+        ),
     }
 
 
@@ -322,14 +338,18 @@ def _on_forecast(rs: dict, phase: str = "FORECAST_0") -> dict:
     """
     Generate or refine forecast + actual markets for all 48 SPs.
 
-    FORECAST_0: Initial forecast with full uncertainty — generates markets.
-    FORECAST_1: Post-DA update — new weather data reduces forecast error.
-    FORECAST_2: Morning-of update — sharp forecast, minimal uncertainty.
+    Real GB timing mirrors:
+      FORECAST_0: D-1 06:00 — 06Z NWP run, initial DA forecast (full uncertainty).
+      FORECAST_1: D-1 09:30 — 12Z run arrives; DA price is a signal; uncertainty -40%.
+      FORECAST_2: D   07:30 — 06Z short-range run; very sharp; uncertainty -70%.
+
+    Produces a forecastUpdateSummary bulletin stored in forecastUpdateHistory
+    so all players see what triggered the revision (weather run, wind delta, DA price).
     """
     err_mult = _FORECAST_ERROR_REDUCTION.get(phase, 1.0)
 
     if phase == "FORECAST_0" or not rs["markets"]:
-        # Generate fresh markets for the day
+        # Generate fresh markets for the day using the 06Z initial run.
         for sp in range(1, SPS_PER_DAY + 1):
             rs["markets"][sp] = market_for_sp(
                 sp, rs["scenarioId"], [],
@@ -338,9 +358,29 @@ def _on_forecast(rs: dict, phase: str = "FORECAST_0") -> dict:
         # Initialise per-player positions for this day
         for pid in rs["playerStates"]:
             rs["positions"][pid] = {sp: 0.0 for sp in range(1, SPS_PER_DAY + 1)}
-        return {"marketsGenerated": SPS_PER_DAY, "forecastStage": phase, "errorMultiplier": err_mult}
+        update_summary = {
+            "stage": "FORECAST_0",
+            "weatherRun": "06Z",
+            "trigger": "06Z weather run · initial DA forecast for all 48 SPs — full uncertainty",
+            "windDeltaGW": 0.0,
+            "demandDeltaMW": 0,
+            "daAvgPrice": None,
+            "daPriceSignal": None,
+            "confidenceGain": 0,
+            "spTightest": None,
+            "perSpRevisions": {},
+        }
+        rs.setdefault("forecastUpdateHistory", []).append(update_summary)
+        rs["forecastUpdateHistory"] = rs["forecastUpdateHistory"][-10:]
+        return {
+            "marketsGenerated": SPS_PER_DAY,
+            "forecastStage": phase,
+            "errorMultiplier": err_mult,
+            "forecastUpdateSummary": update_summary,
+        }
     else:
-        # Refine existing forecasts with reduced error
+        # ── FORECAST_1 (12Z run, post-DA) or FORECAST_2 (06Z short-range) ──
+        # Refine existing forecasts with progressively reduced error.
         updated = 0
         for sp in range(1, SPS_PER_DAY + 1):
             market = rs["markets"].get(sp)
@@ -351,7 +391,31 @@ def _on_forecast(rs: dict, phase: str = "FORECAST_0") -> dict:
             # Update the primary forecast to the refined version
             market["forecast"] = {**market.get("forecast", {}), **updated_fc}
             updated += 1
-        return {"marketsUpdated": updated, "forecastStage": phase, "errorMultiplier": err_mult}
+
+        # For FORECAST_1: incorporate DA clearing price as an information signal.
+        # Real rationale: traders see where DA cleared vs their model → revise NIV.
+        da_avg_price: float | None = None
+        if phase == "FORECAST_1" and rs.get("daResults"):
+            prices = [
+                r.get("cp", 0) for r in rs["daResults"].values()
+                if isinstance(r, dict) and r.get("cp")
+            ]
+            if prices:
+                da_avg_price = round(sum(prices) / len(prices), 1)
+
+        # Generate weather-run bulletin visible to all players.
+        update_summary = generate_forecast_update(
+            rs["markets"], phase, rs.get("scenarioId", "NORMAL"), da_avg_price
+        )
+        rs.setdefault("forecastUpdateHistory", []).append(update_summary)
+        rs["forecastUpdateHistory"] = rs["forecastUpdateHistory"][-10:]
+
+        return {
+            "marketsUpdated": updated,
+            "forecastStage": phase,
+            "errorMultiplier": err_mult,
+            "forecastUpdateSummary": update_summary,
+        }
 
 
 def generate_all_markets(room_id: str) -> dict:

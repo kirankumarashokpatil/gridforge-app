@@ -2,28 +2,43 @@ import React from 'react';
 
 /**
  * Simulated GB market‑time offsets (minutes from midnight D‑1) for each phase.
- * Used to drive the "Market Time" display on the global clock bar.
+ * Times are calibrated to real EPEX/N2EX GB timings:
+ *
+ *   FORECAST_0  D‑1 06:00–09:20  Book opens; 06Z NWP run in; players build DA curves
+ *   DA          D‑1 09:20–09:30  Gate closure + auction processing (1 batch clear)
+ *   FORECAST_1  D‑1 09:30–17:00  12Z weather run in; DA price is new signal; ±40% uncertainty
+ *   IDA1        D‑1 17:00–17:30  IDA1 gate closure 17:30 → results ~17:45
+ *   FORECAST_2  D   07:00–07:55  06Z short-range run; sharpest pre-delivery update; ±70%
+ *   IDA2        D   08:00–08:30  IDA2 gate closure 08:00 → results ~08:15
+ *   ID_ROUNDS   D   continuous   Continuous intraday; gate per SP = 1h before delivery
+ *   REALTIME/BM D   per-SP       BM_OPEN → BM_CLEAR → SP_SETTLED
  */
 const PHASE_TIME_MAP = {
-  FORECAST_0: { startMin: 360,  endMin: 555,  dateLabel: "D\u20111", phaseLabel: "FORECAST (Planning)",     spRange: "All 48 SPs" },
-  DA:         { startMin: 560,  endMin: 570,  dateLabel: "D\u20111", phaseLabel: "DAY\u2011AHEAD CLOSE\u2192RESULTS", spRange: "All 48 SPs" },
-  FORECAST_1: { startMin: 720,  endMin: 1035, dateLabel: "D\u20111", phaseLabel: "FORECAST (Revised)",       spRange: "All 48 SPs" },
-  IDA1:       { startMin: 1050, endMin: 1080, dateLabel: "D\u20111", phaseLabel: "IDA1 CLOSE\u2192RESULTS",      spRange: "All 48 SPs" },
-  FORECAST_2: { startMin: 1800, endMin: 1915, dateLabel: "D",       phaseLabel: "FORECAST (Final)",          spRange: "All 48 SPs" },
-  IDA2:       { startMin: 1920, endMin: 1950, dateLabel: "D",       phaseLabel: "IDA2 CLOSE\u2192RESULTS",       spRange: "All 48 SPs" },
-  ID_ROUNDS:  { startMin: 1980, endMin: null, dateLabel: "D",       phaseLabel: "INTRADAY CONTINUOUS",       spRange: null          },
-  REALTIME:   { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM",                        spRange: null          },
-  BM_OPEN:    { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM",                        spRange: null          },
-  BM_CLEAR:   { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM CLEARING",               spRange: null          },
-  SP_SETTLED: { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "SP SETTLED",                spRange: null          },
-  RESULTS:    { startMin: 2885, endMin: 2885, dateLabel: "D+1",     phaseLabel: "END\u2011OF\u2011DAY RESULTS", spRange: "All 48 SPs" },
+  // D‑1 360 min = 06:00; 560 min = 09:20
+  FORECAST_0: { startMin: 360,  endMin: 560,  dateLabel: "D\u20111", phaseLabel: "DA ORDER BOOK OPEN \u2013 06Z Run",         spRange: "All 48 SPs", weatherRun: "06Z"             },
+  // DA gate at 09:20 (560), results ~09:30 (570)
+  DA:         { startMin: 560,  endMin: 570,  dateLabel: "D\u20111", phaseLabel: "DA GATE CLOSE \u2192 AUCTION RESULTS",      spRange: "All 48 SPs", weatherRun: null              },
+  // FORECAST_1: 09:30 (570) to 17:00 (1020) — 12Z run arrives mid‑afternoon
+  FORECAST_1: { startMin: 570,  endMin: 1020, dateLabel: "D\u20111", phaseLabel: "FORECAST UPDATE \u2013 12Z Weather Run",     spRange: "All 48 SPs", weatherRun: "12Z"             },
+  // IDA1: gate 17:00–17:30 (1020–1050)
+  IDA1:       { startMin: 1020, endMin: 1050, dateLabel: "D\u20111", phaseLabel: "IDA1 GATE CLOSE \u2192 RESULTS",            spRange: "All 48 SPs", weatherRun: null              },
+  // FORECAST_2: D 07:00 = 1440+420=1860; D 07:55 = 1440+475=1915
+  FORECAST_2: { startMin: 1860, endMin: 1915, dateLabel: "D",       phaseLabel: "FORECAST UPDATE \u2013 06Z Short-Range Run", spRange: "All 48 SPs", weatherRun: "06Z (S-R)"       },
+  // IDA2: D 08:00(1920) – D 08:30(1950)
+  IDA2:       { startMin: 1920, endMin: 1950, dateLabel: "D",       phaseLabel: "IDA2 GATE CLOSE \u2192 RESULTS",            spRange: "All 48 SPs", weatherRun: null              },
+  ID_ROUNDS:  { startMin: 1980, endMin: null, dateLabel: "D",       phaseLabel: "INTRADAY CONTINUOUS \u2013 Gate Per SP",     spRange: null,          weatherRun: null              },
+  REALTIME:   { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM",                                        spRange: null,          weatherRun: null              },
+  BM_OPEN:    { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM",                                        spRange: null,          weatherRun: null              },
+  BM_CLEAR:   { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM CLEARING",                               spRange: null,          weatherRun: null              },
+  SP_SETTLED: { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "SP SETTLED",                                spRange: null,          weatherRun: null              },
+  RESULTS:    { startMin: 2885, endMin: 2885, dateLabel: "D+1",     phaseLabel: "END\u2011OF\u2011DAY RESULTS",              spRange: "All 48 SPs", weatherRun: null              },
 
   // Legacy compat
-  FORECAST:   { startMin: 360,  endMin: 555,  dateLabel: "D\u20111", phaseLabel: "FORECAST",          spRange: "All 48 SPs" },
-  ID:         { startMin: 1980, endMin: null, dateLabel: "D",       phaseLabel: "INTRADAY CONTINUOUS", spRange: null          },
-  BM:         { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM",                  spRange: null          },
-  BM_CLOSE:   { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM CLEARING",         spRange: null          },
-  SETTLED:    { startMin: 2885, endMin: 2885, dateLabel: "D+1",     phaseLabel: "RESULTS",             spRange: "All 48 SPs" },
+  FORECAST:   { startMin: 360,  endMin: 560,  dateLabel: "D\u20111", phaseLabel: "DA ORDER BOOK OPEN \u2013 06Z Run", spRange: "All 48 SPs", weatherRun: "06Z" },
+  ID:         { startMin: 1980, endMin: null, dateLabel: "D",       phaseLabel: "INTRADAY CONTINUOUS",                spRange: null,          weatherRun: null  },
+  BM:         { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM",                                 spRange: null,          weatherRun: null  },
+  BM_CLOSE:   { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM CLEARING",                        spRange: null,          weatherRun: null  },
+  SETTLED:    { startMin: 2885, endMin: 2885, dateLabel: "D+1",     phaseLabel: "RESULTS",                            spRange: "All 48 SPs", weatherRun: null  },
 };
 
 // Format minutes-from-midnight into HH:MM
@@ -104,19 +119,36 @@ export default function MarketClockBar({ phase, sp, msLeft, tickSpeed, bmSubPhas
   if (isBmLike && (phase === "BM_OPEN" || phase === "REALTIME" || phase === "BM")) {
     timerLabel = "Time Left In SP";
   } else if (phase === "DA") {
-    timerLabel = "Auction Closes In";
+    timerLabel = "Gate Closes In";
   } else if (phase === "IDA1" || phase === "IDA2") {
-    timerLabel = `${phase} Closes In`;
+    timerLabel = `${phase} Gate Closes In`;
   } else if (phase === "BM_CLEAR" || phase === "BM_CLOSE" || phase === "SP_SETTLED") {
     timerLabel = "Settling";
+  } else if (phase === "FORECAST_0") {
+    timerLabel = "Book Closes In";
+  } else if (phase === "FORECAST_1" || phase === "FORECAST_2" || phase === "FORECAST") {
+    timerLabel = "Next Gate In";
   } else {
     timerLabel = "Phase Ends In";
   }
 
-  // NIV direction for BM phases (placeholder — could accept as prop)
+  // Weather run badge shown for forecast phases
+  const weatherRun = phaseInfo.weatherRun;
+
+  // Gate time labels matching real EPEX timings
+  const GATE_TIMES = {
+    FORECAST_0: "Gate: 09:20 D\u20111",
+    DA:         "Results: \u223c09:30 D\u20111",
+    FORECAST_1: "IDA1 Gate: 17:00 D\u20111",
+    IDA1:       "Results: \u223c17:45 D\u20111",
+    FORECAST_2: "IDA2 Gate: 08:00 D",
+    IDA2:       "Results: \u223c08:15 D",
+  };
+  const gateTimeText = GATE_TIMES[phase] || null;
+
   const bottomRightText = isBmLike
     ? `NIV Direction: ${bmSubPhase === "BM_OPEN" ? "PENDING" : "CLEARING"}`
-    : `Delivering Day: ${dateLabel === "D\u20111" ? "D (Tomorrow)" : "D (Today)"}`;
+    : (gateTimeText || `Delivering: ${dateLabel === "D\u20111" ? "D (Tomorrow)" : "D (Today)"}`);
 
   const marketTime = simMarketTime(phaseInfo, tPct, sp);
   const countdown = formatCountdown(msLeft);
@@ -151,7 +183,16 @@ export default function MarketClockBar({ phase, sp, msLeft, tickSpeed, bmSubPhas
           <span style={lbl}>Date:</span>
           <span style={val}>{dateLabel} (Simulated)</span>
         </div>
-        <div style={cellStyle("right")}>
+        <div style={{ ...cellStyle("right"), gap: 8 }}>
+          {weatherRun && (
+            <span style={{
+              fontSize: 9, fontWeight: 700, padding: "1px 5px",
+              background: "#1de98b18", border: "1px solid #1de98b55",
+              borderRadius: 3, color: "#1de98b", letterSpacing: 0.5,
+            }}>
+              {weatherRun} RUN
+            </span>
+          )}
           <span style={lbl}>Phase:</span>
           <span style={accentVal}>{displayPhase}</span>
         </div>
@@ -172,11 +213,13 @@ export default function MarketClockBar({ phase, sp, msLeft, tickSpeed, bmSubPhas
       {/* Row 3 */}
       <div style={{ ...rowStyle, marginTop: 4 }}>
         <div style={cellStyle()}>
-          <span style={lbl}>Delivering Day:</span>
-          <span style={val}>D{dateLabel.includes("1") ? " (Tomorrow)" : " (Today)"}</span>
+          <span style={lbl}>{gateTimeText ? "Real Timing:" : "Delivering Day:"}</span>
+          <span style={{ ...val, fontSize: 10, color: gateTimeText ? C.yellow : C.value }}>
+            {bottomRightText}
+          </span>
         </div>
         <div style={cellStyle("right")}>
-          <span style={lbl}>SP Range:</span>
+          <span style={lbl}>SP Scope:</span>
           <span style={val}>{spRangeText}</span>
         </div>
       </div>
