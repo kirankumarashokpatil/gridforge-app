@@ -3,6 +3,9 @@ import { TICK_MS, FREQ_FAIL_DURATION } from '../../shared/constants';
 import { Tip } from '../shared/Tip';
 import { MarketInfoPanel } from '../shared/MarketInfoPanel';
 import ForecastPanel from './ForecastPanel';
+import MarketClockBar from '../shared/MarketClockBar';
+import SPTimelineStrip from '../shared/SPTimelineStrip';
+import SPDetailPanel from '../shared/SPDetailPanel';
 
 /* ─── SHARED STAT CHIP ─── */
 const TS = ({ label, val, vc, tip }) => {
@@ -20,27 +23,33 @@ const f0 = p => Number(p).toLocaleString(undefined, { maximumFractionDigits: 0 }
 const fpp = v => (v >= 0 ? "+" : "") + "£" + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
 
 const NEXT_PHASE = {
+    FORECAST_0: "DA",
     FORECAST: "DA",
     DA: "IDA1",
+    FORECAST_1: "IDA1",
     IDA1: "IDA2",
-    IDA2: "ID",
+    FORECAST_2: "IDA2",
+    IDA2: "ID_ROUNDS",
     ID: "REALTIME",
+    ID_ROUNDS: "REALTIME",
     REALTIME: "BM_OPEN",
-    BM_OPEN: "BM_CLOSE",
+    BM_OPEN: "BM_CLEAR",
+    BM_CLEAR: "SP_SETTLED",
+    SP_SETTLED: "BM_OPEN / RESULTS",
     BM_CLOSE: "BM_OPEN / RESULTS",
-    RESULTS: "FORECAST",
-    BM: "BM_CLOSE",
+    RESULTS: "FORECAST_0",
+    BM: "BM_CLEAR",
     SETTLED: "RESULTS",
 };
 
 function roleChecklist(roleName, phase) {
     const role = String(roleName || "").toUpperCase();
     const isAuction = ["DA", "IDA1", "IDA2"].includes(phase);
-    const isId = phase === "ID";
-    const isBm = ["REALTIME", "BM", "BM_OPEN", "BM_CLOSE"].includes(phase);
+    const isId = phase === "ID" || phase === "ID_ROUNDS";
+    const isBm = ["REALTIME", "BM", "BM_OPEN", "BM_CLEAR", "BM_CLOSE", "SP_SETTLED"].includes(phase);
     const isResults = ["RESULTS", "SETTLED"].includes(phase);
 
-    if (phase === "FORECAST") {
+    if (phase === "FORECAST" || phase === "FORECAST_0" || phase === "FORECAST_1" || phase === "FORECAST_2") {
         return ["Validate forecast shape", "Check likely stress SPs", "Prepare baseline strategy"];
     }
     if (isResults) {
@@ -100,6 +109,7 @@ export default function SharedLayout({
     market,
     paused,
     freqBreachSec,
+    bmSubPhase,
     scenario,
     room,
     cash,
@@ -114,6 +124,7 @@ export default function SharedLayout({
     hint
 }) {
     const [showForecast, setShowForecast] = useState(false);
+    const [selectedSP, setSelectedSP] = useState(null);
     
     // Expose phase state for E2E test diagnostics
     useEffect(() => {
@@ -128,16 +139,17 @@ export default function SharedLayout({
     const tCol = msLeft < (ts * 0.27) ? "#f0455a" : msLeft < (ts * 0.53) ? "#f5b222" : "#1de98b";
 
     // Market state: forecast for pre-realtime phases, actual for realtime/bm/results.
-    const isPreRealtimePhase = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase);
+    const isPreRealtimePhase = ["FORECAST", "FORECAST_0", "FORECAST_1", "FORECAST_2", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(phase);
     const currentMkt = isPreRealtimePhase
         ? (market?.forecast || market?.actual || { niv: 0, sbp: 50, ssp: 50, freq: 50 })
         : (market?.actual || market?.forecast || { niv: 0, sbp: 50, ssp: 50, freq: 50 });
-    const { niv, freq, sbp, ssp, isShort } = currentMkt;
-    const totalPL = (cash || 0) + (daCash || 0);
+    const { niv = 0, freq = 50, sbp = 50, ssp = 50, isShort = false } = currentMkt || {};
+    // Bug fix: cash already includes daCash (settled DA revenue is accumulated into cash)
+    const totalPL = cash || 0;
     const playerCount = leaderboard?.filter(p => p.role !== "instructor")?.length || 0;
     const nextPhase = NEXT_PHASE[phase] || "—";
     const gateOpen = ["REALTIME", "BM", "BM_OPEN"].includes(phase) && msLeft > 0;
-    const gateLabel = ["REALTIME", "BM", "BM_OPEN", "BM_CLOSE"].includes(phase)
+    const gateLabel = ["REALTIME", "BM", "BM_OPEN", "BM_CLEAR", "BM_CLOSE", "SP_SETTLED"].includes(phase)
         ? (gateOpen ? "OPEN" : "CLOSED")
         : "N/A";
     const gateCol = gateLabel === "OPEN" ? "#1de98b" : gateLabel === "CLOSED" ? "#f0455a" : "#4d7a96";
@@ -146,13 +158,14 @@ export default function SharedLayout({
     const gateTimer = gateOpen ? `Closes in ${gateSeconds}s` : `Opens in ${gateSeconds}s`;
 
     const gateAction = (() => {
-        if (phase === "FORECAST") return "Prepare forecast & strategy";
+        if (phase === "FORECAST" || phase === "FORECAST_0" || phase === "FORECAST_1" || phase === "FORECAST_2") return "Prepare forecast & strategy";
         if (phase === "DA") return "Submit/adjust day-ahead contracts";
         if (phase === "IDA1" || phase === "IDA2") return "Submit intraday offers";
-        if (phase === "ID") return "Trade to close position";
+        if (phase === "ID" || phase === "ID_ROUNDS") return "Trade to close position";
         if (phase === "REALTIME") return "Observe system, prepare BM response";
         if (phase === "BM_OPEN") return "Bid/offer in BM";
-        if (phase === "BM_CLOSE") return "Await BM results";
+        if (phase === "BM_CLOSE" || phase === "BM_CLEAR") return "Await BM results";
+        if (phase === "SP_SETTLED") return "Review SP settlement";
         if (phase === "RESULTS") return "Review settlement & performance";
         return "Monitor market state";
     })();
@@ -169,18 +182,24 @@ export default function SharedLayout({
 
     // Phase colour + accessible text label (used by automated tests)
     const PHASE_STYLES = {
-        FORECAST:  { col: "#a78bfa", text: "FORECAST",       lbl: "🔮 FORECAST" },
-        DA:        { col: "#f5b222", text: "DAY-AHEAD",      lbl: "📋 DAY-AHEAD" },
-        IDA1:      { col: "#fb923c", text: "INTRADAY AUC 1", lbl: "🔄 IDA1" },
-        IDA2:      { col: "#f97316", text: "INTRADAY AUC 2", lbl: "🔄 IDA2" },
-        ID:        { col: "#38c0fc", text: "INTRADAY",       lbl: "🤝 INTRADAY" },
-        REALTIME:  { col: "#1de98b", text: "REALTIME",       lbl: "⚡ REALTIME" },
-        BM_OPEN:   { col: "#1de98b", text: "BM OPEN",        lbl: "⚡ BM OPEN" },
-        BM_CLOSE:  { col: "#22d3ee", text: "BM SETTLING",    lbl: "⚡ BM CLOSE" },
-        RESULTS:   { col: "#b78bfa", text: "RESULTS",        lbl: "🏁 RESULTS" },
+        FORECAST_0:  { col: "#a78bfa", text: "FORECAST (Planning)",  lbl: "🔮 FORECAST" },
+        FORECAST_1:  { col: "#c084fc", text: "FORECAST (Revised)",   lbl: "🔮 FORECAST 2" },
+        FORECAST_2:  { col: "#d8b4fe", text: "FORECAST (Final)",     lbl: "🔮 FORECAST 3" },
+        FORECAST:    { col: "#a78bfa", text: "FORECAST",             lbl: "🔮 FORECAST" },
+        DA:          { col: "#f5b222", text: "DAY-AHEAD",            lbl: "📋 DAY-AHEAD" },
+        IDA1:        { col: "#fb923c", text: "INTRADAY AUC 1",      lbl: "🔄 IDA1" },
+        IDA2:        { col: "#f97316", text: "INTRADAY AUC 2",      lbl: "🔄 IDA2" },
+        ID_ROUNDS:   { col: "#38c0fc", text: "INTRADAY CONTINUOUS",  lbl: "🤝 ID ROUNDS" },
+        ID:          { col: "#38c0fc", text: "INTRADAY",             lbl: "🤝 INTRADAY" },
+        REALTIME:    { col: "#1de98b", text: "REALTIME",             lbl: "⚡ REALTIME" },
+        BM_OPEN:     { col: "#1de98b", text: "BM OPEN",             lbl: "⚡ BM OPEN" },
+        BM_CLEAR:    { col: "#22d3ee", text: "BM CLEARING",         lbl: "⚡ BM CLEAR" },
+        SP_SETTLED:  { col: "#94a3b8", text: "SP SETTLED",           lbl: "✅ SP SETTLED" },
+        BM_CLOSE:    { col: "#22d3ee", text: "BM SETTLING",         lbl: "⚡ BM CLOSE" },
+        RESULTS:     { col: "#b78bfa", text: "RESULTS",              lbl: "🏁 RESULTS" },
         // Legacy compat
-        BM:        { col: "#1de98b", text: "BALANCING",      lbl: "⚡ BALANCING" },
-        SETTLED:   { col: "#b78bfa", text: "SETTLED",        lbl: "🏁 SETTLEMENT" },
+        BM:          { col: "#1de98b", text: "BALANCING",            lbl: "⚡ BALANCING" },
+        SETTLED:     { col: "#b78bfa", text: "SETTLED",              lbl: "🏁 SETTLEMENT" },
     };
     const ps = PHASE_STYLES[phase] || PHASE_STYLES.FORECAST;
     const pCol = ps.col;
@@ -321,6 +340,31 @@ export default function SharedLayout({
                     {topRight}
                 </div>
             </header>
+
+            {/* ─── GLOBAL MARKET CLOCK BAR ─── */}
+            <div style={{ padding: "6px 10px 0", flexShrink: 0 }}>
+                <MarketClockBar phase={phase} sp={sp} msLeft={msLeft} tickSpeed={ts} bmSubPhase={phase} />
+            </div>
+
+            {/* ─── SP TIMELINE STRIP ─── */}
+            <div style={{ padding: "4px 10px 0", flexShrink: 0 }}>
+                <SPTimelineStrip sp={sp} phase={phase} bmSubPhase={phase} onSelectSP={setSelectedSP} selectedSP={selectedSP} />
+            </div>
+
+            {/* ─── PER-SP DETAIL PANEL (click to open) ─── */}
+            {selectedSP && (
+                <div style={{ padding: "4px 10px 0", flexShrink: 0 }}>
+                    <SPDetailPanel
+                        selectedSP={selectedSP}
+                        currentSp={sp}
+                        phase={phase}
+                        bmSubPhase={phase}
+                        msLeft={msLeft}
+                        tickSpeed={ts}
+                        onClose={() => setSelectedSP(null)}
+                    />
+                </div>
+            )}
 
             {/* ─── OPERATOR STRIP: NOW / NEXT / GATE / PLAYBOOK ─── */}
             <div style={{ borderBottom: "1px solid #1a3045", background: "#06111b", padding: "6px 10px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flexShrink: 0 }}>

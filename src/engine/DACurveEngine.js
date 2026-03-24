@@ -356,7 +356,11 @@ export function clearFullAuction(playerCurves, marketCtxArray = null) {
     volumes,
     pmax: pmaxArrays,
     spDetails,
-    totalTradedMW: Object.values(volumes).flat().reduce((sum, v) => sum + Math.abs(v), 0) / 2
+    // Bug fix: was dividing by 2 assuming equal buyer+seller volumes, but one-sided markets
+    // (synthetic demand fills the other side) only have seller volumes — /2 halved the total incorrectly.
+    totalTradedMW: Math.max(
+      ...Object.values(volumes).map(vols => vols.reduce((s, v) => s + Math.max(0, -v), 0)) // max seller volume across any player
+    ) || Object.values(volumes).flat().reduce((sum, v) => sum + Math.abs(v), 0) / 2
   };
 }
 

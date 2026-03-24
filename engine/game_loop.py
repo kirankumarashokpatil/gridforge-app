@@ -1,20 +1,31 @@
 """
-GridForge Game Loop — Server-authoritative, day-level + SP-level state machine.
+GridForge Game Loop — server-authoritative market and dispatch state machine,
+aligned with GB short-term power markets.
 
-Architecture (matches real GB market structure):
+Structure (one delivery day D):
 
-  Day-level phases (all 48 SPs traded at once):
-    FORECAST → DA → IDA1 → IDA2 → ID
+  Day-level trading phases (all 48 SPs traded in parallel):
+    FORECAST_0 → DA → FORECAST_1 → IDA1 → FORECAST_2 → IDA2 → ID_ROUNDS
 
-  Real-time phase (SP-by-SP, sequential):
-    REALTIME  →  for SP 1..48:  BM_OPEN → BM_CLOSE
+  Real-time balancing phase (SP-by-SP dispatch):
+    REALTIME → for SP 1..48:  BM_OPEN → BM_CLEAR → SP_SETTLED
 
-  End-of-day:
-    RESULTS → (next day) → FORECAST
+  End-of-day and rollover:
+    RESULTS → FORECAST_0 (next day)
 
-DA/IDA/ID are ex-ante trading stages where players set positions for
-all SPs of delivery day D.  BM is the only real-time per-SP mechanism
-where the system operator balances supply and demand.
+Semantics:
+  FORECAST_0 / _1 / _2 are progressively more accurate forecast updates
+  shown between trading stages. Uncertainty collapses as the day approaches.
+
+  DA / IDA1 / IDA2 are discrete auctions where players build and adjust
+  positions for every Settlement Period of delivery day D.
+
+  ID_ROUNDS represents continuous intraday trading in a small number of
+  rounds where only near-term SPs are tradable (gate closure per SP).
+
+  BM_OPEN → BM_CLEAR → SP_SETTLED is the real-time, per-SP mechanism:
+  the system operator accepts balancing bids/offers, computes NIV and
+  system prices, and settles imbalances for that SP.
 """
 
 from __future__ import annotations
@@ -40,12 +51,33 @@ from .forecast_engine import ForecastEngine
 
 
 # ─── Day-level phase sequence ───
-# Game modes skip phases whose market key isn't in their "markets" list.
-# FORECAST, REALTIME, RESULTS always run.
-_DAY_PHASE_SEQ = ["FORECAST", "DA", "IDA1", "IDA2", "ID", "REALTIME", "RESULTS"]
+# Game modes skip trading phases whose market key isn't in their "markets" list.
+# FORECAST_* phases always run (they precede each trading stage).
+# REALTIME and RESULTS always run.
+_DAY_PHASE_SEQ = [
+    "FORECAST_0", "DA",
+    "FORECAST_1", "IDA1",
+    "FORECAST_2", "IDA2",
+    "ID_ROUNDS",
+    "REALTIME", "RESULTS",
+]
 
+# Maps trading phases to their market key (used to skip disabled phases).
 _PHASE_TO_MARKET = {
-    "DA": "da", "IDA1": "ida1", "IDA2": "ida2", "ID": "id", "REALTIME": "bm",
+    "DA": "da", "IDA1": "ida1", "IDA2": "ida2", "ID_ROUNDS": "id", "REALTIME": "bm",
+}
+
+# Forecast phase that precedes each trading phase (for skip logic).
+# If a trading phase is disabled, its preceding forecast is also skipped.
+_FORECAST_BEFORE = {
+    "DA": "FORECAST_0", "IDA1": "FORECAST_1", "IDA2": "FORECAST_2",
+}
+
+# Error reduction per forecast stage (uncertainty collapses)
+_FORECAST_ERROR_REDUCTION = {
+    "FORECAST_0": 1.0,   # full uncertainty
+    "FORECAST_1": 0.6,   # after DA, new weather data
+    "FORECAST_2": 0.3,   # morning-of, sharp update
 }
 
 
@@ -64,9 +96,9 @@ def _new_room_state() -> dict:
     return {
         # Day / phase tracking
         "day": 1,
-        "dayPhase": "FORECAST",
+        "dayPhase": "FORECAST_0",
         "currentSp": 0,             # 0 = not in REALTIME; 1-48 during REALTIME
-        "bmSubPhase": None,          # "BM_OPEN" | "BM_CLOSE" within REALTIME
+        "bmSubPhase": None,          # "BM_OPEN" | "BM_CLEAR" | "SP_SETTLED"
 
         # Config
         "scenarioId": "NORMAL",
@@ -75,11 +107,11 @@ def _new_room_state() -> dict:
         "tickSpeed": 15000,
         "paused": False,
 
-        # Markets for all 48 SPs (populated during FORECAST)
+        # Markets for all 48 SPs (populated during FORECAST_0)
         "markets": {},               # sp(1-48) → { forecast, actual }
 
         # Per-player per-SP contracted positions (MW)
-        # Built up through: DA → IDA1 → IDA2 → ID
+        # Built up through: DA → IDA1 → IDA2 → ID_ROUNDS
         "positions": {},             # pid → { sp: float }
 
         # Day-level order books (bids for multiple SPs)
@@ -144,13 +176,28 @@ def _enabled_markets(rs: dict) -> list[str]:
 
 
 def _next_day_phase(current: str, rs: dict) -> str:
-    """Advance to next day phase, skipping disabled ones."""
+    """Advance to next day phase, skipping disabled trading phases and their forecasts."""
     markets = _enabled_markets(rs)
     idx = _DAY_PHASE_SEQ.index(current) if current in _DAY_PHASE_SEQ else 0
     for i in range(idx + 1, len(_DAY_PHASE_SEQ)):
         candidate = _DAY_PHASE_SEQ[i]
-        if candidate in ("FORECAST", "REALTIME", "RESULTS"):
+        # Always-run phases
+        if candidate in ("REALTIME", "RESULTS"):
             return candidate
+        # Forecast phases: skip if the trading phase they precede is disabled
+        if candidate.startswith("FORECAST_"):
+            # Find which trading phase this forecast precedes
+            next_trading = None
+            for j in range(i + 1, len(_DAY_PHASE_SEQ)):
+                if not _DAY_PHASE_SEQ[j].startswith("FORECAST_"):
+                    next_trading = _DAY_PHASE_SEQ[j]
+                    break
+            if next_trading:
+                mkey = _PHASE_TO_MARKET.get(next_trading)
+                if mkey and mkey not in markets:
+                    continue  # skip this forecast — its trading phase is disabled
+            return candidate
+        # Trading phases: skip if market not enabled
         market_key = _PHASE_TO_MARKET.get(candidate)
         if market_key and market_key in markets:
             return candidate
@@ -160,16 +207,21 @@ def _next_day_phase(current: str, rs: dict) -> str:
 def advance_day_phase(room_id: str) -> dict:
     """
     Advance to the next day-level phase.
-    Call for: FORECAST → DA → IDA1 → IDA2 → ID → REALTIME.
+
+    Full sequence: FORECAST_0 → DA → FORECAST_1 → IDA1 → FORECAST_2 → IDA2
+                   → ID_ROUNDS → REALTIME.
+
     Once in REALTIME, use advance_bm() instead.
-    After RESULTS, this starts a new day.
+    After RESULTS, this starts a new day at FORECAST_0.
     """
     rs = _get_room(room_id)
     old_phase = rs["dayPhase"]
     result: dict[str, Any] = {"oldPhase": old_phase, "day": rs["day"]}
 
-    if old_phase == "FORECAST":
-        result.update(_on_forecast(rs))
+    # --- Exit actions for the phase we're leaving ---
+
+    if old_phase.startswith("FORECAST_"):
+        result.update(_on_forecast(rs, old_phase))
 
     elif old_phase == "DA":
         result.update(_on_da_close_all(rs))
@@ -177,7 +229,7 @@ def advance_day_phase(room_id: str) -> dict:
     elif old_phase in ("IDA1", "IDA2"):
         result.update(_on_ida_close_all(rs, old_phase))
 
-    elif old_phase == "ID":
+    elif old_phase == "ID_ROUNDS":
         result.update(_on_id_close(rs))
 
     elif old_phase == "REALTIME":
@@ -186,12 +238,14 @@ def advance_day_phase(room_id: str) -> dict:
 
     elif old_phase == "RESULTS":
         result.update(_start_new_day(rs))
-        rs["dayPhase"] = "FORECAST"
+        rs["dayPhase"] = "FORECAST_0"
         result["newPhase"] = rs["dayPhase"]
         return result
 
-    # Determine next phase
-    if old_phase == "ID":
+    # --- Determine next phase ---
+
+    if old_phase == "ID_ROUNDS":
+        # After ID_ROUNDS, always enter REALTIME
         rs["dayPhase"] = "REALTIME"
         rs["currentSp"] = 1
         rs["bmSubPhase"] = "BM_OPEN"
@@ -216,7 +270,7 @@ def advance_day_phase(room_id: str) -> dict:
 def advance_bm(room_id: str) -> dict:
     """
     Advance within the REALTIME phase.
-    Cycles: BM_OPEN → BM_CLOSE → (next SP) BM_OPEN → ...
+    Cycles: BM_OPEN → BM_CLEAR → SP_SETTLED → (next SP) BM_OPEN → ...
     After SP 48 is settled, transitions to RESULTS.
     """
     rs = _get_room(room_id)
@@ -228,13 +282,17 @@ def advance_bm(room_id: str) -> dict:
     result: dict[str, Any] = {"day": rs["day"], "sp": sp}
 
     if sub == "BM_OPEN":
-        # Close BM for this SP: clear, feedback, settle
+        # Clear BM for this SP: merit order clearing, feedback, compute NIV
         result.update(_on_bm_close_sp(rs, sp))
-        rs["bmSubPhase"] = "BM_CLOSE"
+        rs["bmSubPhase"] = "BM_CLEAR"
 
-    elif sub == "BM_CLOSE":
+    elif sub == "BM_CLEAR":
+        # Settlement: imbalance charges, P&L, system metrics
+        rs["bmSubPhase"] = "SP_SETTLED"
+
+    elif sub == "SP_SETTLED":
         if sp >= SPS_PER_DAY:
-            # All SPs done → finalise day
+            # All SPs done → finalise day scores
             result.update(_finalize_day(rs))
             rs["dayPhase"] = "RESULTS"
             rs["currentSp"] = 0
@@ -252,26 +310,49 @@ def advance_bm(room_id: str) -> dict:
 
 
 # ═══════════════════════════════════════════════
-# FORECAST PHASE (generate markets for all 48 SPs)
+# FORECAST PHASES (generate/refine markets for all 48 SPs)
 # ═══════════════════════════════════════════════
 
-def _on_forecast(rs: dict) -> dict:
-    """Generate forecast + actual markets for all 48 SPs."""
-    for sp in range(1, SPS_PER_DAY + 1):
-        rs["markets"][sp] = market_for_sp(
-            sp, rs["scenarioId"], [],
-            rs["publishedForecast"],
-        )
-    # Initialise per-player positions for this day
-    for pid in rs["playerStates"]:
-        rs["positions"][pid] = {sp: 0.0 for sp in range(1, SPS_PER_DAY + 1)}
-    return {"marketsGenerated": SPS_PER_DAY}
+def _on_forecast(rs: dict, phase: str = "FORECAST_0") -> dict:
+    """
+    Generate or refine forecast + actual markets for all 48 SPs.
+
+    FORECAST_0: Initial forecast with full uncertainty — generates markets.
+    FORECAST_1: Post-DA update — new weather data reduces forecast error.
+    FORECAST_2: Morning-of update — sharp forecast, minimal uncertainty.
+    """
+    err_mult = _FORECAST_ERROR_REDUCTION.get(phase, 1.0)
+
+    if phase == "FORECAST_0" or not rs["markets"]:
+        # Generate fresh markets for the day
+        for sp in range(1, SPS_PER_DAY + 1):
+            rs["markets"][sp] = market_for_sp(
+                sp, rs["scenarioId"], [],
+                rs["publishedForecast"],
+            )
+        # Initialise per-player positions for this day
+        for pid in rs["playerStates"]:
+            rs["positions"][pid] = {sp: 0.0 for sp in range(1, SPS_PER_DAY + 1)}
+        return {"marketsGenerated": SPS_PER_DAY, "forecastStage": phase, "errorMultiplier": err_mult}
+    else:
+        # Refine existing forecasts with reduced error
+        updated = 0
+        for sp in range(1, SPS_PER_DAY + 1):
+            market = rs["markets"].get(sp)
+            if not market:
+                continue
+            updated_fc = ida_forecast(market, err_mult)
+            market[f"{phase.lower()}Forecast"] = updated_fc
+            # Update the primary forecast to the refined version
+            market["forecast"] = {**market.get("forecast", {}), **updated_fc}
+            updated += 1
+        return {"marketsUpdated": updated, "forecastStage": phase, "errorMultiplier": err_mult}
 
 
 def generate_all_markets(room_id: str) -> dict:
-    """Public API: generate markets for all SPs (FORECAST phase action)."""
+    """Public API: generate markets for all SPs (FORECAST_0 phase action)."""
     rs = _get_room(room_id)
-    return _on_forecast(rs)
+    return _on_forecast(rs, "FORECAST_0")
 
 
 # ═══════════════════════════════════════════════
@@ -388,7 +469,7 @@ def _on_ida_close_all(rs: dict, ida_round: str) -> dict:
 
 
 # ═══════════════════════════════════════════════
-# ID CLOSE (gate closure — freeze positions)
+# ID_ROUNDS CLOSE (gate closure — freeze positions)
 # ═══════════════════════════════════════════════
 
 def _on_id_close(rs: dict) -> dict:

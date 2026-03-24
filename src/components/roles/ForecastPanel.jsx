@@ -171,7 +171,14 @@ export default function ForecastPanel({ sp, tickSpeed, publishedForecast, isInst
                             <input type="range" min="0" max="1" step="0.05" value={skill} onChange={e => setSkill(+e.target.value)} style={{ width: 80 }} />
                         </div>
                     )}
-                    <button onClick={handleAutoGenerate} disabled={mode === 'manual'} style={{ ...s.btn(false), marginLeft: mode === 'manual' ? "auto" : 8, alignSelf: "flex-end" }}>{mode === 'manual' ? "Clear" : "Generate Auto"}</button>
+                    <button
+                        onClick={mode === 'manual'
+                            ? () => setDraft({ demand: new Array(48).fill(0), wind: new Array(48).fill(0), solar: new Array(48).fill(0) })
+                            : handleAutoGenerate}
+                        disabled={false}
+                        style={{ ...s.btn(false), marginLeft: mode === 'manual' ? "auto" : 8, alignSelf: "flex-end" }}>
+                        {mode === 'manual' ? "Clear" : "Generate Auto"}
+                    </button>
                 </div>
             )}
 

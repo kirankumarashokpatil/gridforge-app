@@ -1,4 +1,5 @@
 import puppeteer from 'puppeteer';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 (async () => {
     try {
@@ -14,7 +15,7 @@ import puppeteer from 'puppeteer';
 
         console.log("Navigating...");
         await page.goto('http://localhost:5173');
-        await page.waitForTimeout(1000);
+        await sleep(1000);
 
         console.log("Clicking a role card (Generator by default)...");
         // simply pick the first visible role card (usually Generator)
@@ -26,7 +27,7 @@ import puppeteer from 'puppeteer';
                 break;
             }
         }
-        await page.waitForTimeout(500);
+        await sleep(500);
 
         console.log("Entering name and room...");
         const inputs = await page.$$('input');
@@ -42,7 +43,7 @@ import puppeteer from 'puppeteer';
                 break;
             }
         }
-        await page.waitForTimeout(1000);
+        await sleep(1000);
 
         // optionally pick an asset if one appears (e.g. OCGT generator)
         const assetCards = await page.$$('button');
@@ -55,7 +56,7 @@ import puppeteer from 'puppeteer';
         }
 
         console.log("Waiting for dashboard crash...");
-        await page.waitForTimeout(2000);
+        await sleep(2000);
         await browser.close();
         console.log("Done");
     } catch (e) {

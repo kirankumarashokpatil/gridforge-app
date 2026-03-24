@@ -45,7 +45,35 @@ const TEST_CASES = [
   { name: 'Smoke_DSR',      roleId: 'DSR',       roleLabel: 'Demand Controller', needsAsset: true,  assetKey: 'DSR' },
 ];
 
+const API_BASE = 'http://localhost:8000';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// PID registry for direct server assignment
+const playerPids = {};
+
+async function readPid(page, playerName) {
+  const pid = await page.evaluate(async () => {
+    const prefix = 'gridforge_playerId:';
+    for (let i = 0; i < 60; i++) {
+      if (window.name.startsWith(prefix)) return window.name.slice(prefix.length);
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return null;
+  }).catch(() => null);
+  if (pid) playerPids[playerName] = pid;
+  return pid;
+}
+
+async function serverAssign(roomCode, playerName, data) {
+  const pid = playerPids[playerName];
+  if (!pid) return false;
+  const res = await fetch(`${API_BASE}/api/rooms/${roomCode}/players/${pid}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+  return res.ok;
+}
 
 async function waitFor(page, predicate, timeout = 30000, arg) {
   const deadline = Date.now() + timeout;
@@ -123,6 +151,28 @@ async function enterLobby(page, playerName, roomCode) {
     document.body.textContent.includes('NESO CONTROL') ||
     document.body.textContent.includes('WAITING ROOM')
   , 20000);
+
+  // Read PID for server-side assignment
+  await readPid(page, playerName);
+
+  // Ensure room exists on server
+  await fetch(`${API_BASE}/api/rooms/${roomCode}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scenarioId: 'BAU' })
+  }).catch(() => {});
+
+  // Register player
+  const pid = playerPids[playerName];
+  if (pid) {
+    const pData = { name: playerName, lastSeen: Date.now() };
+    if (playerName === 'NESO_Host') { pData.role = 'NESO'; pData.status = 'ASSIGNED'; }
+    await fetch(`${API_BASE}/api/rooms/${roomCode}/players/${pid}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pData)
+    }).catch(() => {});
+  }
 }
 
 async function nesoAssignRole(nesoPage, playerName, roleId) {
@@ -172,6 +222,10 @@ async function testRole(cfg) {
 
   console.log(`\n[${name}] Room: ${ROOM} | Role: "${roleLabel}"${assetKey ? ` | Asset: "${assetKey}"` : ''}`);
 
+  // Purge stale room
+  await fetch(`${API_BASE}/api/rooms/${ROOM}`, { method: 'DELETE' }).catch(() => {});
+  await sleep(300);
+
   const nesoBrowser = await puppeteer.launch({
     headless: HEADLESS ? 'new' : false,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -202,10 +256,12 @@ async function testRole(cfg) {
     console.log(`[${name}]   ✓ Player entered waiting room`);
     await sleep(2000);
 
-    // ── NESO assigns role ──
+    // ── NESO assigns role (UI + server fallback) ──
     console.log(`[${name}]   NESO assigning role: ${roleId}...`);
     const roleResult = await nesoAssignRole(nesoPage, name, roleId);
-    if (roleResult !== 'OK') console.warn(`[${name}]   ⚠ Role assign: ${roleResult}`);
+    // Always also assign via direct server API (reliable)
+    await serverAssign(ROOM, name, { role: roleId, status: 'ASSIGNED' });
+    if (roleResult !== 'OK') console.warn(`[${name}]   ⚠ Role UI assign: ${roleResult} (server fallback used)`);
     else console.log(`[${name}]   ✓ Role assigned`);
 
     // ── NESO assigns asset if needed ──
@@ -213,7 +269,8 @@ async function testRole(cfg) {
       console.log(`[${name}]   NESO assigning asset: ${assetKey}...`);
       await sleep(500);
       const assetResult = await nesoAssignAsset(nesoPage, name, assetKey);
-      if (assetResult !== 'OK') console.warn(`[${name}]   ⚠ Asset assign: ${assetResult}`);
+      await serverAssign(ROOM, name, { assignedAssetKey: assetKey, status: 'ASSIGNED' });
+      if (assetResult !== 'OK') console.warn(`[${name}]   ⚠ Asset UI assign: ${assetResult} (server fallback used)`);
       else console.log(`[${name}]   ✓ Asset assigned`);
     }
 

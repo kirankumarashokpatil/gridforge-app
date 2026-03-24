@@ -7,10 +7,10 @@ export default function MarketOverviewPanel({ phase, daOrderBook, daResult, idOr
 
     // Map new phase names to display groups
     const isAuctionPhase = ["DA", "IDA1", "IDA2"].includes(phase);
-    const isIdPhase = phase === "ID";
-    const isBmPhase = ["BM", "BM_OPEN", "BM_CLOSE", "REALTIME"].includes(phase);
-    const isResultPhase = ["SETTLED", "RESULTS"].includes(phase);
-    const isWaitPhase = ["FORECAST"].includes(phase);
+    const isIdPhase = phase === "ID" || phase === "ID_ROUNDS";
+    const isBmPhase = ["BM", "BM_OPEN", "BM_CLEAR", "BM_CLOSE", "SP_SETTLED", "REALTIME"].includes(phase);
+    const isSettled = ["SETTLED", "RESULTS"].includes(phase);
+    const isWaitPhase = ["FORECAST", "FORECAST_0", "FORECAST_1", "FORECAST_2"].includes(phase);
 
     return (
         <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>

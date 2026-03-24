@@ -185,7 +185,7 @@ export default function NESOScreen(props) {
     const [demandSurge, setDemandSurge] = useState(0); // -0.1 to +0.1 (±10% demand injection)
 
     // ── Derive ALL data from real game state ─────────────────────────────────
-    const currentMkt = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase) ? market?.forecast : market?.actual;
+    const currentMkt = ["FORECAST_0", "FORECAST_1", "FORECAST_2", "FORECAST", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(phase) ? market?.forecast : market?.actual;
     const { freq = 50, niv = 0, isShort = false, sbp = 0, ssp = 0, wf = 0.5, event = null } = currentMkt || {};
 
     // Grid stress level banner based on live NIV

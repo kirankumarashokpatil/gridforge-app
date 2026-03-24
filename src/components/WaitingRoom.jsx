@@ -29,10 +29,12 @@ export default function WaitingRoom({
     const normalizePlayer = (p, prev) => {
         const id = p.id || p.player_id;
         const normalized = {
+            ...prev,
             ...p,
             id,
             lastSeen: p.lastSeen || p.last_seen || 0,
             assignedAssetKey: p.assignedAssetKey || p.asset || null,
+            createdAt: p.createdAt || p.created_at || prev?.createdAt || prev?.created_at || null,
         };
         // Preserve transient preference fields from previous state if not in new data
         if (prev) {
@@ -42,50 +44,80 @@ export default function WaitingRoom({
         return normalized;
     };
 
-    // Connect to WebSocket on mount
+    const getAuthoritativeHostId = (playerList) => {
+        const namedPlayers = (playerList || [])
+            .filter(p => p?.id && p?.name && p.name.trim())
+            .sort((left, right) => {
+                const leftTs = left.createdAt ? new Date(left.createdAt).getTime() : Number.MAX_SAFE_INTEGER;
+                const rightTs = right.createdAt ? new Date(right.createdAt).getTime() : Number.MAX_SAFE_INTEGER;
+                if (leftTs !== rightTs) return leftTs - rightTs;
+                return String(left.id).localeCompare(String(right.id));
+            });
+
+        if (namedPlayers.length === 0) return null;
+
+        const nesoPlayers = namedPlayers.filter(p => p.role === "NESO");
+        return (nesoPlayers[0] || namedPlayers[0]).id;
+    };
+
+    const mergePlayers = (incomingPlayers) => {
+        setPlayers(prev => {
+            const next = { ...prev };
+            incomingPlayers.forEach(player => {
+                const playerId = player.id || player.player_id;
+                if (!playerId) return;
+                next[playerId] = normalizePlayer(player, prev[playerId]);
+            });
+            return next;
+        });
+    };
+
+    // Connect to WebSocket on mount and register player (runs once)
     useEffect(() => {
         if (!room || joinedRef.current) return;
         joinedRef.current = true;
-        
+
         // Connect WebSocket for real-time updates
         connect(room);
-        
+
         // Create room if it doesn't exist, then register player via API
+        // NOTE: name may be empty on first render if React hasn't propagated it yet.
+        // The name-sync effect below will push the correct name once available.
         if (api && pid) {
             api.createRoom(room, scenarioId || "BAU")
                 .catch(err => console.warn('[WaitingRoom] createRoom skipped/failed:', err))
-                .then(() => {
-                    console.log('[WaitingRoom] putPlayer called with name:', JSON.stringify(name), 'pid:', pid, 'room:', room);
-                    return api.putPlayer(room, pid, {
+                .then(() => api.putPlayer(room, pid, {
                     name: (name || "").trim(),
                     preferredRole: null,
                     preferredAssetKey: null,
                     lastSeen: Date.now(),
-                });
-                })
+                }))
                 .then(async () => {
-                    console.log('[WaitingRoom] Player registered:', { pid, name });
-                    // Fetch full player list to populate state (fixes host detection race)
+                    // Fetch full player list to populate state and determine host
                     try {
                         const allPlayers = await api.getPlayers(room);
-                        if (Array.isArray(allPlayers)) {
-                            const normalized = allPlayers.map(p => normalizePlayer(p));
-                            // Determine host status immediately from the database truth
-                            const me = normalized.find(p => p.id === pid);
-                            const otherNamed = normalized.filter(p => p.id !== pid && p.name);
-                            if (!isHost && me?.name && otherNamed.length === 0) {
-                                console.log('[WaitingRoom] Detected as first player from API - setting as host');
-                                setIsHost(true);
-                            }
+                        if (Array.isArray(allPlayers) && allPlayers.length > 0) {
+                            mergePlayers(allPlayers);
 
-                            if (normalized.length > 0 && setPlayers) {
-                                setPlayers(prev => {
-                                    const keyed = {};
-                                    normalized.forEach(p => {
-                                        if (p.id) keyed[p.id] = normalizePlayer(p, prev[p.id]);
+                            const normalized = allPlayers.map(p => normalizePlayer(p));
+                            const hostId = getAuthoritativeHostId(normalized);
+                            const amHost = hostId === pid;
+
+                            if (amHost) {
+                                setIsHost(true);
+                                try {
+                                    await api.putPlayer(room, pid, {
+                                        role: "NESO",
+                                        preferredRole: "NESO",
+                                        status: "ASSIGNED",
+                                        ready: true,
+                                        lastSeen: Date.now(),
                                     });
-                                    return { ...prev, ...keyed };
-                                });
+                                } catch (err) {
+                                    console.error('[WaitingRoom] Failed to assign NESO role:', err);
+                                }
+                            } else {
+                                setIsHost(false);
                             }
                         }
                     } catch (err) {
@@ -96,7 +128,16 @@ export default function WaitingRoom({
                     console.error('[WaitingRoom] Failed to register player:', err);
                 });
         }
-    }, [api, room, pid, name, connect]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [api, room, pid, connect, setPlayers]); // name intentionally omitted — handled by name-sync effect below
+
+    // Name-sync effect: push the player name to the backend whenever it changes.
+    // This handles the case where name prop arrives after the initial registration.
+    useEffect(() => {
+        if (!api || !pid || !room || !name?.trim()) return;
+        api.putPlayer(room, pid, { name: name.trim(), lastSeen: Date.now() })
+            .catch(err => console.warn('[WaitingRoom] Name sync failed:', err));
+    }, [api, pid, room, name]);
 
     // Keep-alive heartbeat
     useEffect(() => {
@@ -114,23 +155,28 @@ export default function WaitingRoom({
             try {
                 const allPlayers = await api.getPlayers(room);
                 if (Array.isArray(allPlayers) && allPlayers.length > 0) {
-                    setPlayers(prev => {
-                        const keyed = {};
-                        allPlayers.forEach(p => {
-                            const id = p.id || p.player_id;
-                            if (id) keyed[id] = normalizePlayer(p, prev[id]);
-                        });
-                        return { ...prev, ...keyed };
-                    });
+                    mergePlayers(allPlayers);
                 }
             } catch (err) {
                 // Ignore polling errors
             }
         };
         poll(); // Immediate first poll
-        const interval = setInterval(poll, 4000);
+        const interval = setInterval(poll, 1500);
         return () => clearInterval(interval);
-    }, [api, room]);
+    }, [api, room, setPlayers]);
+
+    useEffect(() => {
+        if (!pid) return;
+        const normalizedPlayers = Object.values(players)
+            .filter(Boolean)
+            .map(player => normalizePlayer(player, player));
+        const hostId = getAuthoritativeHostId(normalizedPlayers);
+        const shouldBeHost = hostId === pid;
+        if (shouldBeHost !== isHost) {
+            setIsHost(shouldBeHost);
+        }
+    }, [players, pid, isHost, setIsHost]);
 
 
     useEffect(() => {
@@ -176,7 +222,7 @@ export default function WaitingRoom({
         api.updateRoom(room, {
             roomState: ROOM_STATES.RUNNING,
             sp: 1,
-            phase: "FORECAST",
+            phase: "FORECAST_0",
             phaseStartTs: now,
             scenarioId,
             paused: false,
@@ -197,25 +243,6 @@ export default function WaitingRoom({
     const roleOptions = Object.values(ROLES).filter(r => !r.isSystem && r.id !== "INSTRUCTOR");
     const assignableRoleOptions = roleOptions; // NESO is now marked as isSystem, so it's automatically excluded
     const myPlayer = pid ? players[pid] : null;
-
-    // Debug: Log player state
-    console.log('[WaitingRoom] Players state:', {
-        totalPlayers: Object.keys(players).length,
-        activePlayers: activePlayers.length,
-        allPlayers: Object.entries(players).map(([id, p]) => ({
-            id,
-            name: p?.name,
-            role: p?.role,
-            preferredRole: p?.preferredRole,
-            assignedAssetKey: p?.assignedAssetKey,
-            preferredAssetKey: p?.preferredAssetKey,
-            lastSeen: p?.lastSeen,
-            ageSec: p?.lastSeen ? Math.floor((now - p.lastSeen) / 1000) : 'unknown'
-        })),
-        myPid: pid,
-        isHost,
-        myPlayer: myPlayer
-    });
 
     const myPreferredRole = isHost ? "NESO" : (myPlayer?.preferredRole || "GENERATOR");
     const myPreferredAssetKey = myPlayer?.preferredAssetKey || "";

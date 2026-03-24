@@ -149,12 +149,12 @@ export function useGameEngine(appState, playerRefs, setters, callbacks) {
     console.log('[GameEngine] handlePhaseTransition (compat):', { oldPhase, oldSp, rid });
 
     // Day-level phases
-    if (["FORECAST", "DA", "IDA1", "IDA2", "ID", "RESULTS"].includes(oldPhase)) {
+    if (["FORECAST", "FORECAST_0", "FORECAST_1", "FORECAST_2", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS", "RESULTS"].includes(oldPhase)) {
       return handleDayPhaseTransition(oldPhase, rid);
     }
 
     // BM phases during REALTIME
-    if (oldPhase === "BM_OPEN" || oldPhase === "BM_CLOSE" || oldPhase === "BM_GATE" || oldPhase === "REALTIME") {
+    if (oldPhase === "BM_OPEN" || oldPhase === "BM_CLOSE" || oldPhase === "BM_CLEAR" || oldPhase === "SP_SETTLED" || oldPhase === "BM_GATE" || oldPhase === "REALTIME") {
       return handleBmAdvance(rid);
     }
 

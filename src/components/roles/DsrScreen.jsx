@@ -24,7 +24,7 @@ export default function DsrScreen(props) {
     // Lookup Asset details
     const def = ASSETS[assetKey] || ASSETS.DSR;
     const isShort = market?.actual?.isShort || market?.forecast?.isShort;
-    const currentMkt = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase) ? market?.forecast : market?.actual;
+    const currentMkt = ["FORECAST_0", "FORECAST_1", "FORECAST_2", "FORECAST", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(phase) ? market?.forecast : market?.actual;
     const sbp = currentMkt?.sbp || 50; const ssp = currentMkt?.ssp || 50;
 
     // Revenue calculations
@@ -142,7 +142,7 @@ export default function DsrScreen(props) {
 
     // --- SECTION 3: MARKET BIDS ---
     const isDa = ["DA", "IDA1", "IDA2"].includes(phase);
-    const isId = phase === "ID";
+    const isId = phase === "ID" || phase === "ID_ROUNDS";
     const isBm = ["BM", "BM_OPEN", "REALTIME"].includes(phase);
 
     // Re-calculating the user constraints as they type.
@@ -296,7 +296,13 @@ export default function DsrScreen(props) {
         }
     }, [pid]);
 
-    const actualPhysical = contractPosition + (cSp.bmAccepted?.mw || 0) * (market?.actual?.isShort ? 1 : -1);
+    // Bug fix: derive sign from accepted bid side, not grid isShort flag
+    // (DSR can bid either direction; isShort reflects grid state, not player direction)
+    const bmSide = cSp.bmAccepted?.side;
+    const bmMwSigned = bmSide === 'offer' ? (cSp.bmAccepted?.mw || 0)
+        : bmSide === 'bid' ? -(cSp.bmAccepted?.mw || 0)
+        : (cSp.bmAccepted?.mw || 0) * (market?.actual?.isShort ? 1 : -1); // fallback
+    const actualPhysical = contractPosition + bmMwSigned;
 
     const sect4RealTime = (
         <div style={{ padding: 16, display: "flex", flexDirection: "column", height: "100%", background: "#050e16" }}>

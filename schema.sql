@@ -8,7 +8,7 @@ CREATE TABLE rooms (
     room_id VARCHAR(20) PRIMARY KEY,
     scenario_id VARCHAR(50) NOT NULL DEFAULT 'NORMAL',
     sp INTEGER NOT NULL DEFAULT 1 CHECK (sp >= 1 AND sp <= 48),
-    phase VARCHAR(10) NOT NULL DEFAULT 'DA' CHECK (phase IN ('DA', 'ID', 'BM', 'SETTLED')),
+    phase VARCHAR(20) NOT NULL DEFAULT 'FORECAST_0' CHECK (phase IN ('FORECAST_0', 'FORECAST_1', 'FORECAST_2', 'DA', 'IDA1', 'IDA2', 'ID_ROUNDS', 'REALTIME', 'BM_OPEN', 'BM_CLEAR', 'SP_SETTLED', 'RESULTS')),
     room_state VARCHAR(20) DEFAULT 'WAITING' CHECK (room_state IN ('WAITING', 'RUNNING', 'FINISHED')),
     phase_start_ts BIGINT NOT NULL,
     tick_speed INTEGER NOT NULL DEFAULT 60000,
@@ -21,12 +21,13 @@ CREATE TABLE rooms (
 -- 2. PLAYERS
 -- =====================================================
 CREATE TABLE players (
-    player_id VARCHAR(50) PRIMARY KEY,
+    player_id VARCHAR(50) NOT NULL,
     room_id VARCHAR(20) NOT NULL REFERENCES rooms(room_id) ON DELETE CASCADE,
     name VARCHAR(100) NOT NULL,
-    role VARCHAR(30) NOT NULL,
+    role VARCHAR(30) NOT NULL DEFAULT 'UNASSIGNED',
     asset VARCHAR(30),
-    status VARCHAR(20) DEFAULT 'UNASSIGNED' CHECK (status IN ('UNASSIGNED', 'READY', 'ACTIVE', 'DISCONNECTED')),
+    status VARCHAR(20) DEFAULT 'UNASSIGNED' CHECK (status IN ('UNASSIGNED', 'ASSIGNED', 'READY', 'ACTIVE', 'DISCONNECTED')),
+    PRIMARY KEY (player_id, room_id),
     custom_config JSONB,
     cash NUMERIC(12,2) NOT NULL DEFAULT 0,
     da_cash NUMERIC(12,2) NOT NULL DEFAULT 0,

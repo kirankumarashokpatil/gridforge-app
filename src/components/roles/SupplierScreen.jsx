@@ -39,7 +39,7 @@ export default function SupplierScreen(props) {
         idMyOrder, setIdMyOrder, idSubmitted, onIdSubmit,
         spContracts, pid, contractPosition,
         daOrderBook, daResult, idOrderBook, bmOrderBook, simRes, currentSp,
-        positions, daPositions, daAuctionResults, daCurveSegments, onDaCurveSubmit, forecasts
+        positions, daPositions, daAuctionResults, daCurveSegments, onDaCurveSubmit, forecasts, spHistory
     } = props;
     const daAlreadyCleared = daAuctionResults && daAuctionResults.prices && daAuctionResults.prices.length > 0;
     const [useAdvancedMode, setUseAdvancedMode] = useState(false); // Advanced curve mode for suppliers

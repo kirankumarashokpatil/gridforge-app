@@ -261,20 +261,12 @@ manager = ConnectionManager()
 
 @app.post("/api/rooms/{room_id}")
 async def create_or_get_room(room_id: str, scenario_id: Optional[str] = "NORMAL"):
-    """Create or get room"""
+    """Create or get room (idempotent - ON CONFLICT DO NOTHING prevents race condition 500s)"""
     try:
-        # Check if exists
-        existing = await db.query(
-            "SELECT * FROM rooms WHERE room_id = $1",
-            room_id
+        await db.execute(
+            "INSERT INTO rooms (room_id, scenario_id, phase_start_ts) VALUES ($1, $2, $3) ON CONFLICT (room_id) DO NOTHING",
+            room_id, scenario_id, int(datetime.now().timestamp() * 1000)
         )
-        
-        if not existing:
-            await db.execute(
-                "INSERT INTO rooms (room_id, scenario_id, phase_start_ts) VALUES ($1, $2, $3)",
-                room_id, scenario_id, int(datetime.now().timestamp() * 1000)
-            )
-        
         room = await db.query("SELECT * FROM rooms WHERE room_id = $1", room_id)
         return dict(room[0]) if room else {"error": "Room not found"}
     except Exception as e:
@@ -290,6 +282,16 @@ async def get_room_meta(room_id: str):
         return dict(result[0])
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/rooms/{room_id}")
+async def delete_room(room_id: str):
+    """Delete a room and all its players/bids (used by E2E tests to clean up stale data)"""
+    try:
+        await db.execute("DELETE FROM players WHERE room_id = $1", room_id)
+        await db.execute("DELETE FROM rooms WHERE room_id = $1", room_id)
+        return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -357,89 +359,94 @@ async def get_players(room_id: str):
 
 @app.post("/api/rooms/{room_id}/players/{player_id}")
 async def put_player(room_id: str, player_id: str, data: Dict[str, Any]):
-    """Create or update player (partial update - only fields present in data are changed)"""
+    """Create or update player (atomic upsert — race-condition-free).
+    
+    Uses INSERT ON CONFLICT DO NOTHING to atomically ensure the row exists,
+    then a separate UPDATE for the partial-field changes. Two concurrent calls
+    for the same player will both succeed: the loser of the INSERT race does
+    nothing on INSERT, then both apply their UPDATE (idempotent for same data).
+    """
     try:
         now_ts = int(datetime.now().timestamp() * 1000)
 
-        # Check if player already exists
-        existing = await db.query(
-            "SELECT * FROM players WHERE player_id = $1 AND room_id = $2",
-            player_id, room_id
+        # Ensure room exists (auto-create with defaults to satisfy FK constraint)
+        await db.execute(
+            "INSERT INTO rooms (room_id, scenario_id, phase_start_ts) VALUES ($1, 'NORMAL', $2) ON CONFLICT (room_id) DO NOTHING",
+            room_id, now_ts
         )
 
-        if not existing:
-            # INSERT new player with provided fields + defaults
-            sql = '''
-                INSERT INTO players 
-                (player_id, room_id, name, asset, role, custom_config, cash, da_cash, sof, status, last_seen)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            '''
-            await db.execute(
-                sql,
-                player_id,
-                room_id,
-                data.get("name"),
-                data.get("asset"),
-                data.get("role"),
-                json.dumps(data.get("custom_config", {})),
-                data.get("cash", 0),
-                data.get("da_cash", 0),
-                data.get("sof", 50),
-                data.get("status", "UNASSIGNED"),
-                now_ts
-            )
-        else:
-            # PARTIAL UPDATE - only update fields actually provided in data
-            field_map = {
-                "name": "name",
-                "asset": "asset",
-                "role": "role",
-                "custom_config": "custom_config",
-                "cash": "cash",
-                "da_cash": "da_cash",
-                "sof": "sof",
-                "status": "status",
-                "lastSeen": "last_seen",
-                "last_seen": "last_seen",
-                "ready": "status",  # ready flag maps to status
-                "assignedAssetKey": "asset",
-            }
+        # Step 1: Atomic upsert — inserts new row (with name if provided) OR updates
+        # last_seen and name on conflict. The ON CONFLICT...DO UPDATE atomically
+        # ensures the name is set on the very first successful write with no window
+        # where the row exists with a null name.
+        _name_val = data.get("name")
+        if isinstance(_name_val, str) and not _name_val.strip():
+            _name_val = None  # treat blank as NULL
 
-            updates = []
-            values = []
-            idx = 1
+        await db.execute(
+            """
+            INSERT INTO players (player_id, room_id, name, custom_config, cash, da_cash, sof, status, last_seen)
+            VALUES ($1, $2, COALESCE($3, ''), '{}', 0, 0, 50, 'UNASSIGNED', $4)
+            ON CONFLICT (player_id, room_id) DO UPDATE SET
+                name = CASE
+                    WHEN EXCLUDED.name IS NOT NULL AND EXCLUDED.name != ''
+                    THEN EXCLUDED.name
+                    ELSE players.name
+                END,
+                last_seen = GREATEST(EXCLUDED.last_seen, players.last_seen)
+            """,
+            player_id, room_id, _name_val, now_ts
+        )
 
-            for key, value in data.items():
-                col = field_map.get(key)
-                if col is None:
-                    continue  # skip unknown fields
-                # Special handling for custom_config (serialize to JSON)
-                if key == "custom_config":
-                    value = json.dumps(value or {})
-                # Special handling: don't overwrite name/role with None on partial updates
-                if key in ("name", "role", "asset") and value is None:
+        # Step 2: Partial UPDATE — only touch the fields actually provided in data
+        field_map = {
+            "name": "name",
+            "asset": "asset",
+            "role": "role",
+            "custom_config": "custom_config",
+            "cash": "cash",
+            "da_cash": "da_cash",
+            "sof": "sof",
+            "status": "status",
+            # lastSeen / last_seen intentionally excluded — we always set last_seen = now_ts below
+            "ready": "status",  # ready flag maps to status column
+            "assignedAssetKey": "asset",
+        }
+
+        updates = []
+        values = []
+        idx = 1
+
+        for key, value in data.items():
+            col = field_map.get(key)
+            if col is None:
+                continue  # skip unknown fields
+            # Special handling for custom_config (serialize to JSON)
+            if key == "custom_config":
+                value = json.dumps(value or {})
+            # Never overwrite name/role/asset with None or empty string
+            if key in ("name", "role", "asset") and (value is None or (isinstance(value, str) and not value.strip())):
+                continue
+            # ready flag → status; don't double-set if 'status' is also in data
+            if key == "ready":
+                if "status" in data:
                     continue
-                # Special handling for ready flag: maps to status field
-                if key == "ready":
-                    # Don't overwrite status if 'status' is also in data
-                    if "status" in data:
-                        continue
-                    value = "READY" if value else "ASSIGNED"
-                updates.append(f"{col} = ${idx}")
-                values.append(value)
-                idx += 1
-
-            # Always update last_seen and updated_at
-            updates.append(f"last_seen = ${idx}")
-            values.append(now_ts)
+                value = "READY" if value else "ASSIGNED"
+            updates.append(f"{col} = ${idx}")
+            values.append(value)
             idx += 1
-            updates.append("updated_at = CURRENT_TIMESTAMP")
 
-            if updates:
-                values.append(player_id)
-                values.append(room_id)
-                sql = f"UPDATE players SET {', '.join(updates)} WHERE player_id = ${idx} AND room_id = ${idx + 1}"
-                await db.execute(sql, *values)
+        # Always refresh last_seen and updated_at
+        updates.append(f"last_seen = ${idx}")
+        values.append(now_ts)
+        idx += 1
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+
+        if updates:
+            values.append(player_id)
+            values.append(room_id)
+            sql = f"UPDATE players SET {', '.join(updates)} WHERE player_id = ${idx} AND room_id = ${idx + 1}"
+            await db.execute(sql, *values)
 
         # Fetch the full current player record to broadcast
         updated = await db.query(

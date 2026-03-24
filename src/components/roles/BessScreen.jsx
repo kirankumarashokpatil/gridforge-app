@@ -27,7 +27,7 @@ export default function BessScreen(props) {
     // Lookup Asset details
     const def = ASSETS[assetKey] || ASSETS.BESS_S;
     const isShort = market?.actual?.isShort || market?.forecast?.isShort;
-    const currentMkt = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase) ? market?.forecast : market?.actual;
+    const currentMkt = ["FORECAST_0", "FORECAST_1", "FORECAST_2", "FORECAST", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(phase) ? market?.forecast : market?.actual;
     const sbp = currentMkt?.sbp || 50; const ssp = currentMkt?.ssp || 50;
 
     // Revenue calculations
@@ -40,8 +40,9 @@ export default function BessScreen(props) {
     const currentSoc = props.soc ? Math.round(props.soc) : (def.startSoC || 50);
 
     // --- BATTERY SPECIFIC ENERGY LIMIT CALCULATIONS ---
-    const maxDischargeMwh = (currentSoc / 100) * def.maxMWh; // Available energy to discharge
-    const maxChargeMwh = def.maxMWh - maxDischargeMwh; // Available headroom to charge
+    // Bug fix: use MIN_SOC floor so UI matches the physics engine bounds
+    const maxDischargeMwh = ((currentSoc - (def.minSoC || 10)) / 100) * def.maxMWh; // Available energy to discharge (respects MIN_SOC)
+    const maxChargeMwh = def.maxMWh - ((currentSoc / 100) * def.maxMWh); // Available headroom to charge
 
     // Convert MWh constraints to MW constraints for the current half-hour SP (MW = MWh / 0.5)
     // Factoring in efficiency constraints natively
@@ -195,7 +196,7 @@ export default function BessScreen(props) {
 
     // --- SECTION 3: MARKET BIDS ---
     const isDa = ["DA", "IDA1", "IDA2"].includes(phase);
-    const isId = phase === "ID";
+    const isId = phase === "ID" || phase === "ID_ROUNDS";
     const isBm = ["BM", "BM_OPEN", "REALTIME"].includes(phase);
 
     // Re-calculating the user constraints as they type. DA and ID use simple bid/ask numbers. BM offers direct injection/consumption MW values like generator.

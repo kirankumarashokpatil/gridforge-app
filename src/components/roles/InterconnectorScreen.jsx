@@ -25,7 +25,7 @@ export default function InterconnectorScreen(props) {
   } = props;
 
   const def = ASSETS[assetKey] || ASSETS.INTERCONNECTOR || ASSETS.BESS_S;
-  const currentMkt = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase) ? market?.forecast : market?.actual;
+  const currentMkt = ["FORECAST_0", "FORECAST_1", "FORECAST_2", "FORECAST", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(phase) ? market?.forecast : market?.actual;
   const sysDemand = (market?.actual || market?.forecast || {})?.system?.demandMw || 0;
   const sysWind = (market?.actual || market?.forecast || {})?.system?.windMw || 0;
   const sysSolar = (market?.actual || market?.forecast || {})?.system?.solarMw || 0;

@@ -65,10 +65,10 @@ export function updateSoF(def, sofuel, mwAcc, isShort) {
         const eff = def.eff || 1;
         if (isShort) {
             const internalCostMwh = mwh / eff;
-            return clamp(sofuel - (internalCostMwh / def.maxMWh) * 100, 0, 100);
+            return clamp(sofuel - (internalCostMwh / def.maxMWh) * 100, MIN_SOC, MAX_SOC);
         } else {
             const internalGainMwh = mwh * eff;
-            return clamp(sofuel + (internalGainMwh / def.maxMWh) * 100, 0, 100);
+            return clamp(sofuel + (internalGainMwh / def.maxMWh) * 100, MIN_SOC, MAX_SOC);
         }
     }
     if (def.kind === "fuel") return isShort ? clamp(sofuel - mwh, 0, def.fuelMWh) : sofuel;

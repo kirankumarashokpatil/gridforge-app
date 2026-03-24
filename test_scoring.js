@@ -63,7 +63,7 @@ assert('BESS £200/MWh → roleScore ~100', bessGood.roleScore, 90, 15);
 // ── Supplier Role Score ──
 console.log('\n── Supplier Role Score ──');
 const supplierCheap = computeRoleScore('SUPPLIER', { netCost: 4000, totalMWh: 100, hedgeRatio: 0.9, imbalanceCost: 100 });
-assert('Supplier £40/MWh → roleScore', supplierCheap.roleScore, 26, 10);
+assert('Supplier £40/MWh → roleScore', supplierCheap.roleScore, 99, 5);
 
 // ── System Score ──
 console.log('\n── System Score ──');

@@ -27,7 +27,7 @@ export default function GeneratorScreen(props) {
     // Lookup Asset details
     const def = ASSETS[assetKey] || ASSETS.BESS_S;
     const isShort = market?.actual?.isShort || market?.forecast?.isShort;
-    const currentMkt = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase) ? market?.forecast : market?.actual;
+    const currentMkt = ["FORECAST_0", "FORECAST_1", "FORECAST_2", "FORECAST", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(phase) ? market?.forecast : market?.actual;
     const sbp = currentMkt?.sbp || 50; const ssp = currentMkt?.ssp || 50;
 
     // Revenue calculations
@@ -213,7 +213,7 @@ export default function GeneratorScreen(props) {
 
     // --- SECTION 3: MARKET BIDS ---
     const isDa = ["DA", "IDA1", "IDA2"].includes(phase);
-    const isId = phase === "ID";
+    const isId = phase === "ID" || phase === "ID_ROUNDS";
     const isBm = ["BM", "BM_OPEN", "REALTIME"].includes(phase);
 
     const sect3Bids = (

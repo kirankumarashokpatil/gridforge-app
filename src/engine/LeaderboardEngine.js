@@ -32,8 +32,11 @@ export function buildLeaderboard(players) {
         }
     }
 
-    // System steward: highest systemScore
-    const systemSteward = players.reduce((a, b) => (b.systemScore || 0) > (a.systemScore || 0) ? b : a, players[0]);
+    // System steward: highest systemScore — only award if at least one player has a positive score
+    const bestSysScore = Math.max(...players.map(p => p.systemScore || 0));
+    const systemSteward = bestSysScore > 0
+        ? players.reduce((a, b) => (b.systemScore || 0) > (a.systemScore || 0) ? b : a, players[0])
+        : null;
 
     // Most consistent: lowest variance in overallScore history (if available)
     // If no history, use the player with overallScore closest to the group average

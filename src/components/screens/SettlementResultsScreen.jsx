@@ -33,7 +33,7 @@ export default function SettlementResultsScreen({
 
   // Helper to format time
   const formatTime = (sp) => {
-    const startMin = sp * 30;
+    const startMin = (sp - 1) * 30;  // Bug fix: was sp*30 which shifted all times by 30 minutes
     const h = Math.floor(startMin / 60);
     const m = startMin % 60;
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
@@ -41,7 +41,7 @@ export default function SettlementResultsScreen({
 
   // Helper to format gate closure time
   const formatGateClosure = (sp) => {
-    const spStartMin = sp * 30;
+    const spStartMin = (sp - 1) * 30;  // Bug fix: same off-by-one correction
     const gateMin = spStartMin - 60; // 1 hour before
     const h = Math.floor(gateMin / 60);
     const m = gateMin % 60;
@@ -71,9 +71,10 @@ export default function SettlementResultsScreen({
           <div style={styles.cardLabel}>BM Revenue</div>
           <div style={{...styles.cardValue, color: '#b78bfa'}}>£{totalBmRevenue.toFixed(0)}</div>
         </div>
-        <div style={{...styles.summaryCard, borderColor: totalImbalance >= 0 ? '#f0455a' : '#1de98b'}}>
+        <div style={{...styles.summaryCard, borderColor: totalImbalance <= 0 ? '#f0455a' : '#1de98b'}}>
           <div style={styles.cardLabel}>Imbalance</div>
-          <div style={{...styles.cardValue, color: totalImbalance >= 0 ? '#f0455a' : '#1de98b'}}>
+          {/* Bug fix: negative imbalance (shortage at SBP) is the bad case — was inverted */}
+          <div style={{...styles.cardValue, color: totalImbalance <= 0 ? '#f0455a' : '#1de98b'}}>
             £{totalImbalance.toFixed(0)}
           </div>
         </div>
@@ -114,7 +115,7 @@ export default function SettlementResultsScreen({
                   backgroundColor: result.sp % 2 === 0 ? '#1a1a1a' : '#222',
                 }}
               >
-                <div style={styles.colSp}>{result.sp + 1}</div>
+                <div style={styles.colSp}>{result.sp}</div>
                 <div style={styles.colTime}>{formatTime(result.sp)}</div>
                 <div style={styles.colGate}>{formatGateClosure(result.sp)}</div>
                 <div style={styles.colDa}>{result.daVolume.toFixed(1)}</div>

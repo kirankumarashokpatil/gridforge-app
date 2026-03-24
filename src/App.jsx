@@ -71,17 +71,23 @@ export default function App() {
   const { api, ready, connect, subscribe } = useApi();
   const { toasts, add: addToast } = useToasts();
 
+  // Support URL query params for E2E testing: ?playerName=Alice&roomCode=ALPHA
+  const _urlParams = new URLSearchParams(window.location.search);
+  const _urlName = _urlParams.get('playerName') || '';
+  const _urlRoom = _urlParams.get('roomCode') || '';
+
   const [screen, setScreen] = useState("lobby");
-  const [name, setName] = useState("");
-  const [room, setRoom] = useState("");
-  const [pid, setPid] = useState(null);
+  const [name, setName] = useState(_urlName);
+  const [room, setRoom] = useState(_urlRoom);
+  // Initialize pid eagerly so WaitingRoom always receives a valid pid on first render
+  const [pid, setPid] = useState(() => getOrCreatePlayerId());
   const [asset, setAsset] = useState(null);
   const [assetConfig, setAssetConfig] = useState(null);
   const [isInstructor, setIsInstructor] = useState(false);
   const [scenarioId, setScenarioId] = useState("NORMAL");
   const [sp, setSp] = useState(0);            // currentSp from backend (0 = pre-REALTIME)
-  const [phase, setPhase] = useState("FORECAST"); // dayPhase from backend
-  const [bmSubPhase, setBmSubPhase] = useState(null); // BM_OPEN / BM_CLOSE during REALTIME
+  const [phase, setPhase] = useState("FORECAST_0"); // dayPhase from backend
+  const [bmSubPhase, setBmSubPhase] = useState(null); // BM_OPEN / BM_CLEAR / SP_SETTLED during REALTIME
   const [day, setDay] = useState(1);           // Current trading day
   const [phaseStartTs, setPhaseStartTs] = useState(0);
   const [market, setMarket] = useState(null); // Current SP market { forecast, actual }
@@ -278,15 +284,24 @@ export default function App() {
     const unsubPlayers = subscribe(`room:${room}:players`, (data) => {
       if (data && typeof data === 'object') {
         // Normalize: ensure each player record has 'id' and 'lastSeen'
-        const normalized = {};
-        for (const [key, val] of Object.entries(data)) {
-          if (val && typeof val === 'object') {
-            normalized[key] = { ...val, id: val.id || val.player_id || key, lastSeen: val.lastSeen || val.last_seen || 0 };
-          } else {
-            normalized[key] = val;
+        setPlayers(prev => {
+          const normalized = {};
+          for (const [key, val] of Object.entries(data)) {
+            if (val && typeof val === 'object') {
+              normalized[key] = {
+                ...prev[key],
+                ...val,
+                id: val.id || val.player_id || key,
+                lastSeen: val.lastSeen || val.last_seen || prev[key]?.lastSeen || prev[key]?.last_seen || 0,
+                createdAt: val.createdAt || val.created_at || prev[key]?.createdAt || prev[key]?.created_at || null,
+                assignedAssetKey: val.assignedAssetKey || val.asset || prev[key]?.assignedAssetKey || prev[key]?.asset || null,
+              };
+            } else {
+              normalized[key] = val;
+            }
           }
-        }
-        setPlayers(prev => ({ ...prev, ...normalized }));
+          return { ...prev, ...normalized };
+        });
       }
     });
 
@@ -338,11 +353,27 @@ export default function App() {
       }
     });
 
+    // Polling fallback: if WebSocket doesn't deliver roomState: RUNNING, poll REST
+    let roomStatePoll = null;
+    if (screen === 'waiting_room') {
+      roomStatePoll = setInterval(async () => {
+        try {
+          const meta = await api.getRoomMeta(room);
+          if (meta?.room_state === 'RUNNING' || meta?.roomState === 'RUNNING') {
+            setScreen(prev => prev === 'waiting_room' ? 'game_init' : prev);
+          }
+        } catch (_) {
+          // Ignore poll errors
+        }
+      }, 2000);
+    }
+
     return () => {
       unsubPlayers?.();
       unsubMeta?.();
       unsubForecast?.();
       unsubSpContracts?.();
+      if (roomStatePoll) clearInterval(roomStatePoll);
     };
   }, [screen, room, api, subscribe]);
 
@@ -609,7 +640,7 @@ export default function App() {
 
     if (mState.actual?.event && mState.actual.event.id !== lastEventRef.current) {
       lastEventRef.current = mState.actual.event.id;
-      if (["ID", "BM", "BM_OPEN", "BM_CLOSE", "REALTIME"].includes(phase)) {
+      if (["ID", "ID_ROUNDS", "BM", "BM_OPEN", "BM_CLEAR", "BM_CLOSE", "REALTIME"].includes(phase)) {
         addToast({ emoji: mState.actual.event.emoji, title: mState.actual.event.name, body: mState.actual.event.desc, col: mState.actual.event.col });
       }
     }
@@ -632,7 +663,7 @@ export default function App() {
 
       // GRID FAILURE CHECK
       const curPhase = refs.current.phase;
-      const m = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(curPhase) ? market?.forecast : market?.actual;
+      const m = ["FORECAST_0", "FORECAST_1", "FORECAST_2", "FORECAST", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(curPhase) ? market?.forecast : market?.actual;
       if (m) {
         const freqLimit = gameMode === "TUTORIAL" ? FORGIVENESS.freqFailDuration : FREQ_FAIL_DURATION;
         if (m.freq < FREQ_FAIL_LO || m.freq > FREQ_FAIL_HI) {
@@ -661,8 +692,8 @@ export default function App() {
     if (old.phase === "INIT" || !market) return; // Ignore first load
 
     // Detect BM sub-phase transitions during REALTIME
-    const bmJustClosed = (phase === "REALTIME" && bmSubPhase === "BM_CLOSE" && old.bmSubPhase === "BM_OPEN");
-    const bmJustOpened = (phase === "REALTIME" && bmSubPhase === "BM_OPEN" && old.bmSubPhase === "BM_CLOSE");
+    const bmJustClosed = (phase === "REALTIME" && (bmSubPhase === "BM_CLEAR" || bmSubPhase === "BM_CLOSE") && old.bmSubPhase === "BM_OPEN");
+    const bmJustOpened = (phase === "REALTIME" && bmSubPhase === "BM_OPEN" && (old.bmSubPhase === "BM_CLEAR" || old.bmSubPhase === "BM_CLOSE" || old.bmSubPhase === "SP_SETTLED"));
 
     const { pid: id, name: n, room: rm, asset: ak, orderBookSnap, daOrderBookSnap, soc: s, gameMode } = refs.current;
 
@@ -759,7 +790,7 @@ export default function App() {
     }
 
     // --- ID CLOSED ---
-    else if (old.phase === "ID") {
+    else if (old.phase === "ID" || old.phase === "ID_ROUNDS") {
       const idArr = Object.values(refs.current.idOrderBookSnap || {}).filter(b => b && b.mw);
       // Ensure 'buy' and 'sell' are mapped to 'bid' and 'offer' just in case
       const bids = idArr.filter(b => b.side === "buy" || b.side === "bid").map(b => ({ ...b })).sort((a, b) => b.price - a.price);
@@ -816,7 +847,7 @@ export default function App() {
     }
 
     // --- BM CLOSED (Actual Delivery) ---
-    else if (old.phase === "BM" || old.phase === "BM_OPEN" || bmJustClosed) {
+    else if (old.phase === "BM" || old.phase === "BM_OPEN" || old.phase === "BM_CLEAR" || bmJustClosed) {
       const bmArr = [...Object.values(orderBookSnap || {}).filter(b => b && b.mw), ...market.actual.bots];
       const res = clearBM(bmArr, market.actual);
       setMarket(prev => ({ ...prev, actual: feedbackMarketState(prev.actual, res) })); // Update with post-clearing prices and frequency
@@ -844,7 +875,7 @@ export default function App() {
         for (const b of res.accepted) {
           if (b.isBot && b.id.startsWith("BOT_")) continue; // Skip generic market fillers
           if (!next[old.sp][b.id]) next[old.sp][b.id] = {};
-          next[old.sp][b.id].bmAccepted = { mw: b.mwAcc, price: res.cp, rev: b.revenue };
+          next[old.sp][b.id].bmAccepted = { mw: b.mwAcc, price: res.cp, rev: b.revenue, side: b.side };
         }
         return next;
       });
@@ -857,7 +888,7 @@ export default function App() {
     // --- ENTERING SETTLEMENT (Elexon Calculation) ---
     // Skip settlement on RESULTS if coming from REALTIME — each SP was already settled on BM_CLOSE
     const skipResultsSettlement = (phase === "RESULTS" && old.phase === "REALTIME");
-    if (!skipResultsSettlement && (phase === "SETTLED" || phase === "RESULTS" || phase === "BM_CLOSE" || bmJustClosed)) {
+    if (!skipResultsSettlement && (phase === "SETTLED" || phase === "RESULTS" || phase === "BM_CLOSE" || phase === "BM_CLEAR" || phase === "SP_SETTLED" || bmJustClosed)) {
       const settleSp = old.sp; // Use the SP that just completed, NOT the current sp
       // Bug #11 fix: capture the market state NOW before the timeout fires,
       // otherwise at fast tick speeds market.actual may belong to the NEXT SP.
@@ -1389,12 +1420,7 @@ export default function App() {
   const sc = SCENARIOS[roomScenario] || SCENARIOS.NORMAL;
 
   if (screen === "lobby") return <LobbyScreen name={name} setName={setName} room={room} setRoom={setRoom} gunReady={ready} onNext={() => {
-    // When joining from Lobby, go to Waiting Room and generate stable PID
-        if (!pid) {
-          const id = getOrCreatePlayerId();
-          setPid(id);
-          setPlayerId(id);
-        }
+    // pid is already initialized eagerly — just switch to waiting room
     setScreen("waiting_room");
   }} />;
   if (screen === "waiting_room") return <WaitingRoom api={api} room={room} name={name} pid={pid} setPid={setPid} role={role} setRole={setRole} setScreen={setScreen} isHost={isInstructor} setIsHost={setIsInstructor} gameMode={gameMode} setGameMode={setGameMode} scenarioId={scenarioId} setScenarioId={setScenarioId} players={players} setPlayers={setPlayers} connect={connect} />;
@@ -1544,6 +1570,7 @@ function LobbyScreen({ name, setName, room, setRoom, gunReady, onNext }) {
         <div style={{ marginBottom: 24 }}>
           <label style={{ fontSize: 11, color: "#64748b", display: "block", marginBottom: 8, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>Trader Name</label>
           <input
+            data-testid="player-name-input"
             value={name}
             placeholder="e.g. Alice, GridTrader1..."
             onChange={e => setName(e.target.value)}
@@ -1558,6 +1585,7 @@ function LobbyScreen({ name, setName, room, setRoom, gunReady, onNext }) {
           <label style={{ fontSize: 11, color: "#64748b", display: "block", marginBottom: 8, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>Room Code</label>
           <div style={{ display: "flex", gap: 8 }}>
             <input
+              data-testid="room-code-input"
               value={room}
               placeholder="e.g. ALPHA"
               onChange={e => setRoom(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))}
@@ -1917,8 +1945,8 @@ function AssetPanel({ market, soc, cash, daCash, myBid, setMyBid, submitted, onS
   const canJoin = def.sides === "both" || (def.sides === "short" && isShort) || (def.sides === "long" && !isShort);
   const ref = isShort ? sbp : ssp, pn = +myBid.price;
   const ok = myBid.price && !isNaN(pn) && (isShort ? pn <= ref * 1.05 : pn >= ref * 0.95);
-  const isDaPhase = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase);
-  const isBm = ["BM", "BM_OPEN", "REALTIME"].includes(phase);
+  const isDaPhase = ["FORECAST_0", "FORECAST_1", "FORECAST_2", "FORECAST", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(phase);
+  const isBm = ["BM", "BM_OPEN", "BM_CLEAR", "REALTIME"].includes(phase);
   const canSub = canJoin && !submitted && myBid.price && !isNaN(pn) && +myBid.mw > 0 && +myBid.mw <= avail + 0.5 && isBm;
   const qPrices = isShort ? [{ val: Math.round(sbp * 0.60), label: "Aggressive", sub: "60% SBP" }, { val: Math.round(sbp * 0.82), label: "Moderate", sub: "82% SBP" }, { val: Math.round(sbp * 0.97), label: "At market", sub: "≈SBP" }] : [{ val: Math.round(ssp * 1.38), label: "Aggressive", sub: "138% SSP" }, { val: Math.round(ssp * 1.14), label: "Moderate", sub: "114% SSP" }, { val: Math.round(ssp * 0.97), label: "At market", sub: "≈SSP" }];
   const smartBid = () => { let sp; if (def.key === "WIND") sp = 5; else if (def.key === "DSR") sp = isShort ? Math.round(sbp * 0.45) : Math.round(ssp * 1.45); else if (def.key === "OCGT") sp = Math.round(sbp * 0.85); else if (def.key === "HYDRO") sp = isShort ? Math.round(sbp * 0.70) : Math.round(ssp * 1.22); else sp = isShort ? Math.round(sbp * 0.78) : Math.round(ssp * 1.18); setMyBid(b => ({ ...b, price: String(sp), mw: Math.min(Math.floor(avail), def.maxMW) })); };

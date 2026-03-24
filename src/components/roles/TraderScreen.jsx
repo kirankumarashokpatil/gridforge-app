@@ -74,7 +74,7 @@ export default function TraderScreen(props) {
         idMyOrder, setIdMyOrder, idSubmitted, onIdSubmit,
         spContracts, pid, cash, contractPosition,
         forecasts, publishedForecast, daOrderBook, daResult, idOrderBook, bmOrderBook, simRes, currentSp,
-        daCurveSegments, onDaCurveSubmit
+        daCurveSegments, onDaCurveSubmit, spHistory
     } = props;
 
     const [tab, setTab] = useState("DA");

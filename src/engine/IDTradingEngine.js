@@ -24,15 +24,14 @@ import { spTime } from '../shared/utils.js';
 // SP48 (23:30-00:00 D+2) closes at 22:30 D+1
 
 export function getGateClosureHour(sp) {
-  // SP1-20: closes on Day D (23:00, 23:30, ... 08:30)
-  // SP21-48: closes on Day D+1 (09:00, 09:30, ... 22:30)
-  if (sp >= 1 && sp <= 20) {
-    // 23:00 for SP1, 23:30 for SP2, etc.
+  // SP1-2: gate closes on Day D (23:00, 23:30) — last two SPs of Day D night
+  // SP3-48: gate closes on Day D+1 (00:00 to 22:30)
+  if (sp <= 2) {
+    // SP1 = 23:00, SP2 = 23:30 on Day D
     return 23 + (sp - 1) * 0.5;
-  } else {
-    // SP21 = 09:00, SP22 = 09:30, ... SP48 = 22:30
-    return 9 + (sp - 21) * 0.5;
   }
+  // SP3 = 00:00, SP4 = 00:30, ... SP48 = 22:30 on Day D+1
+  return (sp - 3) * 0.5;
 }
 
 export function getBMGateClosureHour(sp) {
@@ -69,12 +68,9 @@ export function formatGateClosureTime(sp) {
  * @returns {boolean}
  */
 export function isIDGateOpen(sp, currentTimeHour) {
+  // SP1-2 close on Day D (23:00/23:30) — from Day D+1 perspective always already closed
+  if (sp <= 2) return false;
   const gateHour = getGateClosureHour(sp);
-  // If SP is on Day D+1 (sp > 20), adjust currentTimeHour to account for day rollover
-  if (sp > 20) {
-    // Current time needs to be Day D+1 hours (24+) to compare
-    return currentTimeHour >= 24 && currentTimeHour < gateHour + 24;
-  }
   return currentTimeHour < gateHour;
 }
 

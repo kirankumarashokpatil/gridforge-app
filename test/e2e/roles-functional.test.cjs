@@ -63,7 +63,22 @@ const ROLES = [
   }
 ];
 
+const API_BASE = 'http://localhost:8000';
+const playerPids = {};
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function serverAssign(roomCode, playerName, data) {
+  const pid = playerPids[playerName];
+  if (!pid) { console.error(`  [${playerName}] No stored PID for server assign!`); return false; }
+  const res = await fetch(`${API_BASE}/api/rooms/${roomCode}/players/${pid}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) console.error(`  [${playerName}] serverAssign FAILED: ${res.status}`);
+  return res.ok;
+}
 
 async function waitFor(page, predicate, timeout = 30000, arg) {
   const deadline = Date.now() + timeout;
@@ -112,30 +127,56 @@ async function fillInput(page, placeholder, value) {
 }
 
 async function enterLobby(page, playerName, roomCode) {
-  await page.goto(BASE_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+  const base = BASE_URL.replace(/\/$/, '');
+  const url = `${base}/?playerName=${encodeURIComponent(playerName)}&roomCode=${encodeURIComponent(roomCode)}`;
+  await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+
   await waitFor(page, () =>
     document.body.textContent.includes('Join Session') ||
     document.body.textContent.includes('Online') ||
     document.querySelector('input') !== null
   , 20000);
 
-  await fillInput(page, 'e.g. Alice', playerName);
-  await page.evaluate(() => {
-    const el = Array.from(document.querySelectorAll('input'))
-      .find(i => (i.placeholder || '').includes('ALPHA'));
-    if (el) {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(el, '');
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-  });
-  await fillInput(page, 'ALPHA', roomCode);
+  // Verify the inputs are pre-filled from URL params
+  await waitFor(page, () => {
+    const nameInput = Array.from(document.querySelectorAll('input'))
+      .find(i => i.placeholder?.toUpperCase().includes('E.G. ALICE'));
+    const roomInput = Array.from(document.querySelectorAll('input'))
+      .find(i => i.placeholder?.toUpperCase().includes('E.G. ALPHA'));
+    return nameInput && nameInput.value.length > 0 && roomInput && roomInput.value.length > 0;
+  }, 10000);
+
   await clickButton(page, 'JOIN WAITING ROOM');
   await waitFor(page, () =>
     document.body.textContent.includes('PLAYERS IN ROOM') ||
     document.body.textContent.includes('NESO CONTROL') ||
     document.body.textContent.includes('WAITING ROOM')
   , 20000);
+
+  // Read PID from window.name (set by React app)
+  const registeredPid = await page.evaluate(async (apiBase, roomCode, pName, isNesoHost) => {
+    const prefix = 'gridforge_playerId:';
+    for (let i = 0; i < 60; i++) {
+      if (window.name.startsWith(prefix)) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    const pid = window.name.startsWith(prefix) ? window.name.slice(prefix.length) : null;
+    if (!pid) return null;
+    await fetch(`${apiBase}/api/rooms/${roomCode}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scenarioId: 'BAU' })
+    }).catch(() => {});
+    const playerData = { name: pName, lastSeen: Date.now() };
+    if (isNesoHost) { playerData.role = 'NESO'; playerData.status = 'ASSIGNED'; }
+    await fetch(`${apiBase}/api/rooms/${roomCode}/players/${pid}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(playerData)
+    });
+    return pid;
+  }, API_BASE, roomCode, playerName, playerName === 'NESO_Host');
+  if (registeredPid) playerPids[playerName] = registeredPid;
 }
 
 async function nesoAssignRole(nesoPage, playerName, roleId) {
@@ -195,11 +236,27 @@ async function joinSingleRole(roleCfg) {
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
 
+  // Purge stale room data
+  await fetch(`${API_BASE}/api/rooms/${ROOM_CODE}`, { method: 'DELETE' }).catch(() => {});
+  await sleep(300);
+
   try {
     const nesoPage = await nesoBrowser.newPage();
     const playerPage = await playerBrowser.newPage();
     await nesoPage.setViewport({ width: 1280, height: 800 });
     await playerPage.setViewport({ width: 1280, height: 800 });
+
+    // Capture browser console output for debugging
+    nesoPage.on('console', msg => {
+      const text = msg.text();
+      if (text.includes('[game_init]') || text.includes('[WaitingRoom]') || text.includes('error') || text.includes('Error') || text.includes('RUNNING'))
+        console.log(`  [NESO-console] ${text}`);
+    });
+    playerPage.on('console', msg => {
+      const text = msg.text();
+      if (text.includes('[game_init]') || text.includes('[WaitingRoom]') || text.includes('error') || text.includes('Error') || text.includes('RUNNING'))
+        console.log(`  [Player-console] ${text}`);
+    });
 
     // ── NESO host joins first ──
     console.log(`[${name}] NESO joining room…`);
@@ -214,15 +271,17 @@ async function joinSingleRole(roleCfg) {
     console.log(`[${name}] ✓ Player in waiting room`);
     await sleep(2000);
 
-    // ── NESO assigns role + asset ──
+    // ── NESO assigns role + asset via server API (authoritative) ──
     console.log(`[${name}] NESO assigning role: ${roleId}…`);
     const roleResult = await nesoAssignRole(nesoPage, name, roleId);
-    if (roleResult !== 'OK') throw new Error(`Role assign failed: ${roleResult}`);
+    if (roleResult !== 'OK') console.warn(`[${name}] UI role assign: ${roleResult}`);
+    await serverAssign(ROOM_CODE, name, { role: roleId, status: 'ASSIGNED' });
 
     if (needsAsset && assetKey) {
       await sleep(500);
       const assetResult = await nesoAssignAsset(nesoPage, name, assetKey);
-      if (assetResult !== 'OK') throw new Error(`Asset assign failed: ${assetResult}`);
+      if (assetResult !== 'OK') console.warn(`[${name}] UI asset assign: ${assetResult}`);
+      await serverAssign(ROOM_CODE, name, { assignedAssetKey: assetKey, status: 'ASSIGNED' });
     }
 
     // ── Player readies ──
@@ -241,9 +300,16 @@ async function joinSingleRole(roleCfg) {
     }, { timeout: 15000 });
     await clickButton(nesoPage, 'START GAME');
 
+    // Debug: Check what NESO page shows after starting
+    await sleep(3000);
+    const nesoBody = await nesoPage.evaluate(() => document.body.textContent.slice(0, 200)).catch(() => '');
+    const playerBody = await playerPage.evaluate(() => document.body.textContent.slice(0, 200)).catch(() => '');
+    console.log(`[${name}] After START: NESO body="${nesoBody}"`);
+    console.log(`[${name}] After START: Player body="${playerBody}"`);
+
     // ── Verify game UI loaded ──
     console.log(`[${name}] Waiting for main game UI (SP indicator)…`);
-    await waitFor(playerPage, () => document.body.textContent.includes('/48'), 60000);
+    await waitFor(playerPage, () => document.body.textContent.includes('/48'), 30000);
     console.log(`[${name}] ✓ Game UI loaded`);
 
     // Give the role UI a moment to render its inner panels

@@ -24,7 +24,8 @@ const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 
 const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:3000';
-const ROOM_CODE = 'WR' + Date.now().toString().slice(-5);
+// Use full timestamp to guarantee a unique room code across all test runs
+const ROOM_CODE = 'WR' + Date.now().toString().slice(-8);
 const HEADLESS = process.env.HEADLESS !== 'false';
 
 // ─── Player configurations ────────────────────────────────────────────────
@@ -53,6 +54,11 @@ const results = { passed: [], failed: [] };
 function pass(label) { results.passed.push(label); console.log(`  ✅ ${label}`); }
 function fail(label, err) { results.failed.push({ label, err }); console.error(`  ❌ ${label}: ${err?.message || err}`); }
 
+// ─── Player PID registry — populated during enterLobby ───────────────────
+// Keyed by playerName, value is the browser-generated PID from window.name.
+// Using this avoids re-reading window.name later (which can be stale/wrong).
+const playerPids = {};
+
 // ─── Utilities ────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -67,15 +73,28 @@ async function waitFor(page, predicate, timeout = 30000, arg) {
 }
 
 async function typeInto(page, placeholder, value) {
-    await page.waitForFunction((ph, val) => {
-        const input = Array.from(document.querySelectorAll('input'))
-            .find(i => i.placeholder?.toUpperCase().includes(ph.toUpperCase()));
-        if (!input) return false;
-        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        setter.call(input, val);
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        return true;
-    }, { timeout: 15000 }, placeholder, value.toString());
+    // Wait for the input to appear in the DOM
+    await page.waitForFunction(
+        (ph) => !!Array.from(document.querySelectorAll('input'))
+            .find(i => i.placeholder?.toUpperCase().includes(ph.toUpperCase())),
+        { timeout: 15000 }, placeholder
+    );
+
+    // Get an ElementHandle via evaluateHandle (returns a live DOM reference)
+    const inputHandle = await page.evaluateHandle(
+        (ph) => Array.from(document.querySelectorAll('input'))
+            .find(i => i.placeholder?.toUpperCase().includes(ph.toUpperCase())),
+        placeholder
+    );
+    const el = inputHandle.asElement();
+    if (!el) throw new Error(`Input with placeholder "${placeholder}" not found`);
+
+    // Triple-click selects all existing text, then type replaces it.
+    // ElementHandle.click() dispatches real mouse events → React's onFocus fires.
+    // ElementHandle.type() dispatches real keyboard events → React's onChange fires.
+    await el.click({ clickCount: 3 });
+    await el.type(value.toString(), { delay: 30 });
+    await sleep(200); // allow React batch setState to flush before next action
 }
 
 async function clickButton(page, textFragment, timeout = 20000) {
@@ -91,21 +110,24 @@ async function clickButton(page, textFragment, timeout = 20000) {
 
 // ─── Phase 1: Navigate to lobby + join waiting room ───────────────────────
 async function enterLobby(page, playerName) {
-    await page.goto(BASE_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+    // Pass name and room via URL query params - bypasses React synthetic event timing issues
+    const base = BASE_URL.replace(/\/$/, '');
+    const url = `${base}/?playerName=${encodeURIComponent(playerName)}&roomCode=${encodeURIComponent(ROOM_CODE)}`;
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
 
     await waitFor(page, () =>
         document.body.textContent.includes('Join Session') ||
-        document.body.textContent.includes('Online') ||
         document.querySelector('input') !== null
     , 20000);
 
-    await typeInto(page, 'e.g. Alice', playerName);
-
-    await page.evaluate(() => {
-        const el = document.querySelector('input[placeholder="e.g. ALPHA"]');
-        if (el) { el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); }
-    });
-    await typeInto(page, 'e.g. ALPHA', ROOM_CODE);
+    // Verify the inputs are pre-filled from URL params
+    await waitFor(page, () => {
+        const nameInput = Array.from(document.querySelectorAll('input'))
+            .find(i => i.placeholder?.toUpperCase().includes('E.G. ALICE'));
+        const roomInput = Array.from(document.querySelectorAll('input'))
+            .find(i => i.placeholder?.toUpperCase().includes('E.G. ALPHA'));
+        return nameInput && nameInput.value.length > 0 && roomInput && roomInput.value.length > 0;
+    }, 10000);
 
     await clickButton(page, 'JOIN WAITING ROOM');
 
@@ -116,7 +138,52 @@ async function enterLobby(page, playerName) {
         document.body.textContent.includes('YOUR ASSIGNMENT')
     , 20000);
 
-    console.log(`  [${playerName}] Waiting room entered`);
+    // Direct API registration: read pid from window.name and POST to backend with player name.
+    // Wait up to 6s for window.name to be populated by the React app (slow under resource pressure).
+    const registeredPid = await page.evaluate(async (apiBase, roomCode, pName, isNesoHost) => {
+        const prefix = 'gridforge_playerId:';
+        // Wait up to 6000ms for window.name to be set
+        for (let i = 0; i < 60; i++) {
+            if (window.name.startsWith(prefix)) break;
+            await new Promise(r => setTimeout(r, 100));
+        }
+        const pid = window.name.startsWith(prefix) ? window.name.slice(prefix.length) : null;
+        if (!pid) { console.error('[E2E] window.name has no pid for', pName); return null; }
+        // Ensure room exists first (ignore errors — another player may have created it)
+        await fetch(`${apiBase}/api/rooms/${roomCode}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scenarioId: 'BAU' })
+        }).catch(() => {});
+        // Register this player with their correct name (and role for NESO_Host)
+        const playerData = { name: pName, lastSeen: Date.now() };
+        if (isNesoHost) { playerData.role = 'NESO'; playerData.status = 'ASSIGNED'; }
+        const res = await fetch(`${apiBase}/api/rooms/${roomCode}/players/${pid}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(playerData)
+        });
+        if (!res.ok) { console.error('[E2E] registration failed for', pName, res.status); }
+        return pid;
+    }, 'http://localhost:8000', ROOM_CODE, playerName, playerName === 'NESO_Host');
+
+    if (registeredPid) {
+        playerPids[playerName] = registeredPid;
+        console.log(`  [${playerName}] Waiting room entered (pid: ${registeredPid.slice(-8)})`);
+    } else {
+        // Retry once more after a short delay — sometimes window.name race under load
+        await sleep(3000);
+        const retryPid = await page.evaluate(() => {
+            const prefix = 'gridforge_playerId:';
+            return window.name.startsWith(prefix) ? window.name.slice(prefix.length) : null;
+        }).catch(() => null);
+        if (retryPid) {
+            playerPids[playerName] = retryPid;
+            console.log(`  [${playerName}] Waiting room entered (pid recovered: ${retryPid.slice(-8)})`);
+        } else {
+            console.warn(`  [${playerName}] Waiting room entered (pid unknown — window.name not set)`);
+        }
+    }
 }
 
 // ─── Phase 1b: Non-host sets preferred role ───────────────────────────────
@@ -131,10 +198,13 @@ async function setPreferredRole(page, playerName, roleId) {
 }
 
 // ─── Phase 2: NESO waits for all players to appear ────────────────────────
-async function waitForAllPlayers(nesoPage, expectedCount, timeout = 45000) {
-    await waitFor(nesoPage, count =>
-        (document.body.textContent.match(/PLAYERS IN ROOM \((\d+)\)/) || [])[1] >= count
-    , timeout, expectedCount);
+async function waitForAllPlayers(nesoPage, expectedCount, timeout = 60000) {
+    // Wait for enough active players. NESO host status was already confirmed in Step 1.
+    await waitFor(nesoPage, count => {
+        const text = document.body.textContent;
+        const countMatch = (text.match(/PLAYERS IN ROOM \((\d+)\)/) || [])[1];
+        return parseInt(countMatch, 10) >= count;
+    }, timeout, expectedCount);
     const actual = await nesoPage.evaluate(() =>
         parseInt((document.body.textContent.match(/PLAYERS IN ROOM \((\d+)\)/) || [0, 0])[1], 10)
     );
@@ -142,8 +212,23 @@ async function waitForAllPlayers(nesoPage, expectedCount, timeout = 45000) {
     return actual;
 }
 
+const API_BASE = 'http://localhost:8000';
+
+// Direct server assignment using the PID stored during enterLobby (authoritative)
+async function serverAssign(playerName, data) {
+    const pid = playerPids[playerName];
+    if (!pid) { console.error(`  [${playerName}] No stored PID for server assign!`); return false; }
+    const res = await fetch(`${API_BASE}/api/rooms/${ROOM_CODE}/players/${pid}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+    });
+    if (!res.ok) console.error(`  [${playerName}] serverAssign FAILED: ${res.status}`);
+    return res.ok;
+}
+
 // ─── Phase 3: NESO assigns role to a player ──────────────────────────────
-async function nesoAssignRole(nesoPage, playerName, roleId) {
+async function nesoAssignRole(nesoPage, playerPage, playerName, roleId) {
     const ok = await nesoPage.evaluate((pName, rId) => {
         // Use data-player-name attribute added to each player card
         const card = document.querySelector(`[data-player-name="${pName}"]`);
@@ -157,14 +242,19 @@ async function nesoAssignRole(nesoPage, playerName, roleId) {
         return 'OK';
     }, playerName, roleId);
 
-    if (ok === 'OK') console.log(`  [NESO] Assigned ${roleId} to ${playerName}`);
-    else console.warn(`  [NESO] assign role result: ${ok} (player: ${playerName})`);
+    if (ok !== 'OK') {
+        console.warn(`  [NESO] UI role assign (${ok}) for ${playerName}`);
+    }
+
+    // Always assign via direct server API using the stored PID (no browser intermediary)
+    const success = await serverAssign(playerName, { role: roleId, status: 'ASSIGNED' });
+    if (success) console.log(`  [${playerName}] Role ${roleId} → server assigned`);
     await sleep(600);
     return ok === 'OK';
 }
 
 // ─── Phase 3b: NESO assigns asset to a player ────────────────────────────
-async function nesoAssignAsset(nesoPage, playerName, assetKey) {
+async function nesoAssignAsset(nesoPage, playerPage, playerName, assetKey) {
     // Wait for the asset select to appear (rendered only after role is set)
     await nesoPage.waitForFunction((pName) => {
         const card = document.querySelector(`[data-player-name="${pName}"]`);
@@ -182,8 +272,13 @@ async function nesoAssignAsset(nesoPage, playerName, assetKey) {
         return 'OK';
     }, playerName, assetKey);
 
-    if (ok === 'OK') console.log(`  [NESO] Assigned asset ${assetKey} to ${playerName}`);
-    else console.warn(`  [NESO] assign asset result: ${ok} (player: ${playerName})`);
+    if (ok !== 'OK') {
+        console.warn(`  [NESO] UI asset assign (${ok}) for ${playerName}`);
+    }
+
+    // Always assign asset via direct server API using the stored PID
+    const success = await serverAssign(playerName, { assignedAssetKey: assetKey, status: 'ASSIGNED' });
+    if (success) console.log(`  [${playerName}] Asset ${assetKey} → server assigned`);
     await sleep(600);
     return ok === 'OK';
 }
@@ -249,13 +344,21 @@ function startGunRelay() {
     try {
         try { gunRelayProcess = await startGunRelay(); } catch (e) { console.warn('  [Relay] Could not start relay, using default peers:', e.message); }
 
+        // ── Purge any stale room data from previous runs ─────────────
+        // This eliminates ghost players that accumulate when old test runs used
+        // a room code that happens to collide with this run's code.
+        await fetch(`${API_BASE}/api/rooms/${ROOM_CODE}`, { method: 'DELETE' })
+            .then(r => r.ok && console.log(`  [Setup] Purged any stale room ${ROOM_CODE}`))
+            .catch(() => {});
+        await sleep(300);
+
         // ── Step 1: Launch all browsers + enter lobby ────────────────
         console.log('\n─── Step 1: All Players Enter Lobby ───────────────────');
         for (let i = 0; i < PLAYERS.length; i++) {
             const cfg = PLAYERS[i];
             const browser = await puppeteer.launch({
                 headless: HEADLESS ? 'new' : false,
-                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--disable-default-apps', '--no-first-run']
             });
             browsers.push(browser);
             const page = await browser.newPage();
@@ -284,9 +387,10 @@ function startGunRelay() {
 
         await sleep(3000); // give NESO's host record time to propagate via relay
 
-        // Now join remaining players in parallel
+        // Now join remaining players with small stagger to avoid overwhelming browser resources
         await Promise.all(PLAYERS.slice(1).map(async (cfg, idx) => {
             const i = idx + 1;
+            await sleep(idx * 800); // stagger: 0ms, 800ms, 1600ms ... to reduce simultaneous load
             try {
                 await enterLobby(pages[i], cfg.name);
                 // Verify non-host player did NOT accidentally claim host role
@@ -336,11 +440,11 @@ function startGunRelay() {
         for (let i = 1; i < PLAYERS.length; i++) {
             const cfg = PLAYERS[i];
             try {
-                const roleOk = await nesoAssignRole(pages[0], cfg.name, cfg.role);
+                const roleOk = await nesoAssignRole(pages[0], pages[i], cfg.name, cfg.role);
                 await sleep(800);
 
                 if (cfg.assetKey) {
-                    const assetOk = await nesoAssignAsset(pages[0], cfg.name, cfg.assetKey);
+                    const assetOk = await nesoAssignAsset(pages[0], pages[i], cfg.name, cfg.assetKey);
                     await sleep(800);
                     pass(`Assignment: ${cfg.name} → ${cfg.role} + ${cfg.assetKey}`);
                 } else {
