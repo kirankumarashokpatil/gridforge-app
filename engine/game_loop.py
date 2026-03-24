@@ -147,6 +147,9 @@ def _new_room_state() -> dict:
 def get_room_state(room_id: str) -> dict:
     """Return a serialisable snapshot of room state."""
     rs = _get_room(room_id)
+    forecasts = compute_forecasts(
+        rs.get("currentSp", 0), rs.get("scenarioId", "NORMAL"), rs.get("publishedForecast")
+    )
     return {
         "day": rs["day"],
         "dayPhase": rs["dayPhase"],
@@ -163,6 +166,8 @@ def get_room_state(room_id: str) -> dict:
         "daResults": rs["daResults"],
         "bmResults": rs["bmResults"],
         "spSettlements": rs["spSettlements"],
+        "publishedForecast": rs.get("publishedForecast"),
+        "forecasts": forecasts,
     }
 
 

@@ -364,8 +364,7 @@ export default function NESOScreen(props) {
                 publishedForecast={props.publishedForecast}
                 isInstructor={props.isInstructor}
                 canEdit={true}
-                gun={props.gun}
-                room={props.room}
+                onPublish={props.onForecastPublish}
             />
 
             {/* Demand Surge Tweaking Slider */}

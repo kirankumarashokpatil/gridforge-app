@@ -1417,6 +1417,21 @@ export default function App() {
     addToast({ emoji: "🌍", title: "Scenario changed", body: SCENARIOS[scId]?.name || scId, col: "#f5b222" });
   }, [api, room, addToast]);
 
+  const publishForecast = useCallback(async (forecastPayload) => {
+    if (!api || !room) return null;
+    try {
+      const published = await api.enginePublishForecast(room, forecastPayload || {});
+      if (published) {
+        setPublishedForecast(published);
+      }
+      return published;
+    } catch (err) {
+      console.error('[Forecast] publish failed:', err);
+      addToast({ emoji: '⚠️', title: 'Forecast publish failed', body: 'Could not publish forecast.', col: '#f0455a' });
+      throw err;
+    }
+  }, [api, room, addToast]);
+
   // ─── MULTI-DIMENSIONAL LEADERBOARD ───
   const leaderboardData = useMemo(() => {
     const activePlayers = Object.values(players).filter(p => p && p.name && Date.now() - (p.lastSeen || 0) < 120000)
@@ -1497,6 +1512,7 @@ export default function App() {
       isInstructor, paused, freqBreachSec, contractPosition, imbalancePenalty, earnedAchievements, gameMode, role,
       onTickSpeedChange: instructorSetSpeed, onPauseToggle: instructorTogglePause, onNextPhase: instructorNextPhase,
       onExecuteEvent: instructorTrigger, onScenarioChange: instructorSetScenario, soc, players,
+      onForecastPublish: publishForecast,
       physicalState, setPhysicalState,
       // ─── Scoring Engine data ───
       playerScores, leaderboardData, systemState, overallScoreHistory,

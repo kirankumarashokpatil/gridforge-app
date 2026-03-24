@@ -10,6 +10,7 @@ export default function ForecastPanel({ sp, tickSpeed, publishedForecast, isInst
     const [skill, setSkill] = useState(0.8);
     const canvasRef = useRef(null);
     const [activeTab, setActiveTab] = useState('demand'); // demand, wind, solar
+    const [isPublishing, setIsPublishing] = useState(false);
 
     // The working draft we are editing
     const [draft, setDraft] = useState(() => engine.generateInitialDraft(sp));
@@ -111,8 +112,10 @@ export default function ForecastPanel({ sp, tickSpeed, publishedForecast, isInst
         }
     };
 
-    const handlePublish = () => {
+    const handlePublish = async () => {
+        if (isPublishing) return;
         try {
+            setIsPublishing(true);
             engine.setMode(mode);
             engine.skill_level = skill; // ForecastEngine has no setSkillLevel() method — assign directly
             const v = engine.createManual(
@@ -121,16 +124,19 @@ export default function ForecastPanel({ sp, tickSpeed, publishedForecast, isInst
                 draft.wind,
                 draft.solar
             );
+            if (onPublish) {
+                await onPublish(v);
+            }
+            // Optional local mirror for legacy/dev realtime relay.
             if (gun && room) {
                 const key = roomKey(room, 'forecast');
                 console.log('[ForecastPanel] Publishing to GunDB key:', key);
                 gun.get(key).put({ json: JSON.stringify(v) });
-                if (onPublish) onPublish(v);
-            } else {
-                console.warn('[ForecastPanel] Cannot publish - gun:', !!gun, 'room:', room);
             }
         } catch (err) {
             console.error('[ForecastPanel] handlePublish error:', err);
+        } finally {
+            setIsPublishing(false);
         }
     };
 
@@ -212,8 +218,8 @@ export default function ForecastPanel({ sp, tickSpeed, publishedForecast, isInst
                     </div>
                 </div>
                 {canEdit && (
-                    <button data-testid="publish-forecast" onClick={handlePublish} style={{ padding: "8px 16px", background: "#f97316", border: "none", borderRadius: 4, color: "#fff", fontWeight: "bold", cursor: "pointer", alignSelf: "flex-end" }}>
-                        PUBLISH FORECAST
+                    <button data-testid="publish-forecast" disabled={isPublishing} onClick={handlePublish} style={{ padding: "8px 16px", background: isPublishing ? "#7c2d12" : "#f97316", border: "none", borderRadius: 4, color: "#fff", fontWeight: "bold", cursor: isPublishing ? "not-allowed" : "pointer", alignSelf: "flex-end", opacity: isPublishing ? 0.8 : 1 }}>
+                        {isPublishing ? "PUBLISHING..." : "PUBLISH FORECAST"}
                     </button>
                 )}
             </div>
