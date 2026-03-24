@@ -5,25 +5,25 @@ import React from 'react';
  * Used to drive the "Market Time" display on the global clock bar.
  */
 const PHASE_TIME_MAP = {
-  FORECAST_0: { startMin: 360,  endMin: 560,  dateLabel: "D\u20111", phaseLabel: "FORECAST (Planning)",     spRange: "All 48 SPs" },
-  DA:         { startMin: 560,  endMin: 570,  dateLabel: "D\u20111", phaseLabel: "DAY\u2011AHEAD AUCTION",   spRange: "All 48 SPs" },
+  FORECAST_0: { startMin: 360,  endMin: 555,  dateLabel: "D\u20111", phaseLabel: "FORECAST (Planning)",     spRange: "All 48 SPs" },
+  DA:         { startMin: 560,  endMin: 570,  dateLabel: "D\u20111", phaseLabel: "DAY\u2011AHEAD CLOSE\u2192RESULTS", spRange: "All 48 SPs" },
   FORECAST_1: { startMin: 720,  endMin: 1035, dateLabel: "D\u20111", phaseLabel: "FORECAST (Revised)",       spRange: "All 48 SPs" },
-  IDA1:       { startMin: 1035, endMin: 1050, dateLabel: "D\u20111", phaseLabel: "IDA1 AUCTION",             spRange: "All 48 SPs" },
+  IDA1:       { startMin: 1050, endMin: 1080, dateLabel: "D\u20111", phaseLabel: "IDA1 CLOSE\u2192RESULTS",      spRange: "All 48 SPs" },
   FORECAST_2: { startMin: 1800, endMin: 1915, dateLabel: "D",       phaseLabel: "FORECAST (Final)",          spRange: "All 48 SPs" },
-  IDA2:       { startMin: 1920, endMin: 1930, dateLabel: "D",       phaseLabel: "IDA2 AUCTION",              spRange: "All 48 SPs" },
+  IDA2:       { startMin: 1920, endMin: 1950, dateLabel: "D",       phaseLabel: "IDA2 CLOSE\u2192RESULTS",       spRange: "All 48 SPs" },
   ID_ROUNDS:  { startMin: 1980, endMin: null, dateLabel: "D",       phaseLabel: "INTRADAY CONTINUOUS",       spRange: null          },
   REALTIME:   { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM",                        spRange: null          },
   BM_OPEN:    { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM",                        spRange: null          },
   BM_CLEAR:   { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM CLEARING",               spRange: null          },
   SP_SETTLED: { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "SP SETTLED",                spRange: null          },
-  RESULTS:    { startMin: 2885, endMin: 2885, dateLabel: "D",       phaseLabel: "END\u2011OF\u2011DAY RESULTS", spRange: "All 48 SPs" },
+  RESULTS:    { startMin: 2885, endMin: 2885, dateLabel: "D+1",     phaseLabel: "END\u2011OF\u2011DAY RESULTS", spRange: "All 48 SPs" },
 
   // Legacy compat
-  FORECAST:   { startMin: 360,  endMin: 560,  dateLabel: "D\u20111", phaseLabel: "FORECAST",          spRange: "All 48 SPs" },
+  FORECAST:   { startMin: 360,  endMin: 555,  dateLabel: "D\u20111", phaseLabel: "FORECAST",          spRange: "All 48 SPs" },
   ID:         { startMin: 1980, endMin: null, dateLabel: "D",       phaseLabel: "INTRADAY CONTINUOUS", spRange: null          },
   BM:         { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM",                  spRange: null          },
   BM_CLOSE:   { startMin: null, endMin: null, dateLabel: "D",       phaseLabel: "BM CLEARING",         spRange: null          },
-  SETTLED:    { startMin: 2885, endMin: 2885, dateLabel: "D",       phaseLabel: "RESULTS",             spRange: "All 48 SPs" },
+  SETTLED:    { startMin: 2885, endMin: 2885, dateLabel: "D+1",     phaseLabel: "RESULTS",             spRange: "All 48 SPs" },
 };
 
 // Format minutes-from-midnight into HH:MM

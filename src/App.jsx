@@ -608,12 +608,21 @@ export default function App() {
     if (advanceInFlightRef.current) return;
     advanceInFlightRef.current = true;
 
-    const { phase: currentPhase } = refs.current;
+    const {
+      phase: currentPhase,
+      sp: expectedSp,
+      bmSubPhase: expectedBmSubPhase,
+    } = refs.current;
+    const expectedState = {
+      expectedDayPhase: currentPhase,
+      expectedSp,
+      expectedBmSubPhase,
+    };
 
     try {
       // During REALTIME, use BM advance (per-SP)
       if (currentPhase === "REALTIME") {
-        const result = await api.engineAdvanceBm(room);
+        const result = await api.engineAdvanceBm(room, expectedState);
         if (result) {
           addToast({ emoji: "⚡", title: "BM Advanced", body: `SP ${result.currentSp || ''} — ${result.bmSubPhase || ''}`, col: "#1de98b" });
         }
@@ -621,10 +630,17 @@ export default function App() {
       }
 
       // Day-level phases: FORECAST → DA → IDA1 → IDA2 → ID → REALTIME → RESULTS
-      const result = await api.engineAdvanceDayPhase(room);
+      const result = await api.engineAdvanceDayPhase(room, expectedState);
       if (result) {
         addToast({ emoji: "✅", title: "Phase Advanced", body: `Moved to ${result.dayPhase || 'next phase'}`, col: "#b78bfa" });
       }
+    } catch (err) {
+      const msg = String(err?.message || err || "");
+      if (msg.includes("API error: 409")) {
+        // Another in-flight advance already moved the room; keep clients converged quietly.
+        return;
+      }
+      throw err;
     } finally {
       advanceInFlightRef.current = false;
     }
@@ -968,7 +984,7 @@ export default function App() {
 
         const myDef = { ...ASSETS[ak], ...(refs.current.assetConfig || {}) };
         const contractPosMw = refs.current.contractPosition;
-        const actualPosMw = myC.bmAccepted ? (market.actual.isShort ? myC.bmAccepted.mw : -myC.bmAccepted.mw) : 0;
+        const actualPosMw = myC.bmAccepted ? (settledMarket.actual.isShort ? myC.bmAccepted.mw : -myC.bmAccepted.mw) : 0;
 
         const intendedPhysical = contractPosMw + actualPosMw;
         let actualPhysical = intendedPhysical;
@@ -1101,13 +1117,13 @@ export default function App() {
         }
 
         const deviation = actualPhysical - contractPosMw;
-        const imbPrc = market.actual.isShort ? market.actual.sbp * 1.05 : market.actual.ssp * 0.95;
+        const imbPrc = settledMarket.actual.isShort ? settledMarket.actual.sbp * 1.05 : settledMarket.actual.ssp * 0.95;
         const isForgive = gameMode === "TUTORIAL";
         // Bug #9 fix: signed deviation — over-delivery (positive into short) should earn, not penalize
         const forgiveMult = isForgive ? (FORGIVENESS.penaltyMultiplier || 0.5) : 1;
         const imbPen = deviation >= 0
-          ? (deviation * market.actual.ssp * SP_DURATION_H * forgiveMult)   // Over-delivery: sell excess at SSP
-          : (deviation * market.actual.sbp * SP_DURATION_H * forgiveMult);  // Under-delivery: buy shortfall at SBP
+          ? (deviation * settledMarket.actual.ssp * SP_DURATION_H * forgiveMult)   // Over-delivery: sell excess at SSP
+          : (deviation * settledMarket.actual.sbp * SP_DURATION_H * forgiveMult);  // Under-delivery: buy shortfall at SBP
 
         // Deduct Variable Cost (Fuel/Wear) - Note: storage 'wear' is based on throughput (absolute MW)
         const varCostMwh = myDef.varCost || myDef.wear || 0;
@@ -1132,9 +1148,9 @@ export default function App() {
         // Store physical state at end of settlement for next SP's startup cost determination
         setSpContracts(prev => {
           const next = { ...prev };
-          if (!next[sp]) next[sp] = {};
-          if (!next[sp][id]) next[sp][id] = {};
-          next[sp][id].physicalAtEndOfSp = { status: pState.status, currentMw: pState.currentMw };
+          if (!next[settleSp]) next[settleSp] = {};
+          if (!next[settleSp][id]) next[settleSp][id] = {};
+          next[settleSp][id].physicalAtEndOfSp = { status: pState.status, currentMw: pState.currentMw };
           return next;
         });
 
@@ -1145,17 +1161,17 @@ export default function App() {
 
         const accepted = !!mine; // Bug #1 fix: track whether player was dispatched
         setSpHistory(prev => [{
-          sp,
-          niv: market.actual.niv,
-          indicativeNiv: market.forecast?.indicativeNiv,
-          forecastSbp: market.forecast?.sbp,
-          forecastSsp: market.forecast?.ssp,
-          cp: market.actual.sbp,
-          sbp: market.actual.sbp,
-          ssp: market.actual.ssp,
-          wf: market.actual.wf,
+          sp: settleSp,
+          niv: settledMarket.actual.niv,
+          indicativeNiv: settledMarket.forecast?.indicativeNiv,
+          forecastSbp: settledMarket.forecast?.sbp,
+          forecastSsp: settledMarket.forecast?.ssp,
+          cp: settledMarket.actual.sbp,
+          sbp: settledMarket.actual.sbp,
+          ssp: settledMarket.actual.ssp,
+          wf: settledMarket.actual.wf,
           revenue: totalSpRev,
-          event: market.actual.event,
+          event: settledMarket.actual.event,
           contractPosMw,
           actualPhysical,
           imbPrc,
@@ -1171,15 +1187,15 @@ export default function App() {
 
         // ─── SCORING ENGINE: compute scores after each SP ───
         const playerImbalance = deviation; // signed MW deviation
-        const systemNIV = market.actual.niv;
+        const systemNIV = settledMarket.actual.niv;
         const spImpact = computePlayerSystemImpact(playerImbalance, systemNIV);
         const isStressSP = Math.abs(systemNIV) > (SCORING_CONFIG.stressNIVThreshold || 300);
         const deliveredOk = Math.abs(deviation) < 5; // within 5MW tolerance
 
         // Update system state
         setSystemState(prev => {
-          const balancingCost = Math.abs(market.actual.niv) * (market.actual.sbp || 50) * 0.01;
-          const updated = updateSystemState(prev, { sp, niv: systemNIV, balancingCost, freq: market.actual.freq, blackout: false });
+          const balancingCost = Math.abs(settledMarket.actual.niv) * (settledMarket.actual.sbp || 50) * 0.01;
+          const updated = updateSystemState(prev, { sp: settleSp, niv: systemNIV, balancingCost, freq: settledMarket.actual.freq, blackout: false });
           updated.playerImpacts = updatePlayerImpact(prev.playerImpacts, id, spImpact, isStressSP, deliveredOk);
           return updated;
         });
@@ -1380,7 +1396,7 @@ export default function App() {
 
   const submitIdOrder = useCallback(() => {
     const { pid: id, name: n, room: rm, asset: ak, sp: t } = refs.current;
-    if (!id || !api || phase !== "ID" || idSubmitted) return;
+    if (!id || !api || !["ID", "ID_ROUNDS"].includes(phase) || idSubmitted) return;
     if (!idMyOrder.price || isNaN(+idMyOrder.price) || +idMyOrder.mw <= 0) return;
     const def = ASSETS[ak] || { col: "#ffffff" };
     const bid = { id, name: n, asset: ak, mw: +idMyOrder.mw, price: +idMyOrder.price, side: idMyOrder.side, col: def.col, isBot: false };

@@ -48,7 +48,9 @@ export default function SupplierScreen(props) {
     const [supplierKey, setSupplierKey] = useState(assetKey && SUPPLIERS[assetKey] ? assetKey : "BRITISH_GAS");
     const sup = SUPPLIERS[supplierKey] || SUPPLIERS.BRITISH_GAS;
 
-    const currentMkt = ["FORECAST", "DA", "IDA1", "IDA2", "ID"].includes(phase) ? market?.forecast : market?.actual;
+    const isPreRealtimePhase = ["FORECAST", "FORECAST_0", "FORECAST_1", "FORECAST_2", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(phase);
+    const isForecastRevealPhase = ["FORECAST", "FORECAST_0", "FORECAST_1", "FORECAST_2", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(phase);
+    const currentMkt = isPreRealtimePhase ? market?.forecast : market?.actual;
     const sbp = currentMkt?.sbp || 50;
     const ssp = currentMkt?.ssp || 50;
     const hr = currentMkt?.hr ?? Math.floor((sp - 1) / 2);
@@ -175,7 +177,7 @@ export default function SupplierScreen(props) {
                         <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 14, color: ["SETTLED","RESULTS","BM","BM_OPEN","BM_CLOSE","REALTIME"].includes(phase) ? (actualDemandMw > baseDemandMw ? "#f0455a" : "#1de98b") : "#4d7a96", fontWeight: 800 }}>
                             {["SETTLED","RESULTS","BM","BM_OPEN","BM_CLOSE","REALTIME"].includes(phase) ? `${f0(actualDemandMw)} MW` : "? ? ?"}
                         </div>
-                        <div style={{ fontSize: 8, color: "#2a5570" }}>{["FORECAST","DA","IDA1","IDA2","ID"].includes(phase) ? "Revealed at BM phase" : `Error: ${actualDemandMw > baseDemandMw ? "+" : ""}${f0(actualDemandMw - baseDemandMw)}MW`}</div>
+                        <div style={{ fontSize: 8, color: "#2a5570" }}>{isForecastRevealPhase ? "Revealed at BM phase" : `Error: ${actualDemandMw > baseDemandMw ? "+" : ""}${f0(actualDemandMw - baseDemandMw)}MW`}</div>
                     </div>
                 </div>
             </div>
@@ -268,7 +270,7 @@ export default function SupplierScreen(props) {
 
     // --- SECTION 3: PROCUREMENT ---
     const isDa = ["DA", "IDA1", "IDA2"].includes(phase);
-    const isId = phase === "ID";
+    const isId = phase === "ID" || phase === "ID_ROUNDS";
 
     const sect3Procurement = (
         <div style={{ flex: 1, background: "#08141f", border: "1px solid #1a3045", borderRadius: 8, padding: 16, display: "flex", flexDirection: "column" }}>

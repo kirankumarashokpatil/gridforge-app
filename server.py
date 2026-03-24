@@ -257,6 +257,36 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# Serialize phase advances per room to prevent double-advance races under latency.
+_room_advance_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _get_room_advance_lock(room_id: str) -> asyncio.Lock:
+    lock = _room_advance_locks.get(room_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _room_advance_locks[room_id] = lock
+    return lock
+
+
+def _validate_advance_precondition(rs: Dict[str, Any], data: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Reject stale client advances so retries cannot skip phases/SPs."""
+    if not data:
+        return None
+
+    expected_phase = data.get("expectedDayPhase") or data.get("expectedPhase")
+    expected_sp = data.get("expectedSp")
+    expected_bm = data.get("expectedBmSubPhase")
+
+    if expected_phase is not None and expected_phase != rs.get("dayPhase"):
+        return f"stale phase (expected {expected_phase}, current {rs.get('dayPhase')})"
+    if expected_sp is not None and int(expected_sp) != int(rs.get("currentSp") or 0):
+        return f"stale sp (expected {expected_sp}, current {rs.get('currentSp')})"
+    if expected_bm is not None and expected_bm != rs.get("bmSubPhase"):
+        return f"stale bmSubPhase (expected {expected_bm}, current {rs.get('bmSubPhase')})"
+
+    return None
+
 # ==================== ROOMS ENDPOINTS ====================
 
 @app.post("/api/rooms/{room_id}")
@@ -734,61 +764,81 @@ async def engine_advance_phase(room_id: str):
 
 
 @app.post("/api/rooms/{room_id}/engine/advance-day")
-async def engine_advance_day_phase(room_id: str):
+async def engine_advance_day_phase(room_id: str, data: Optional[Dict[str, Any]] = None):
     """Advance to the next day-level phase (FORECAST→DA→IDA1→IDA2→ID→REALTIME)"""
     try:
-        result = game_loop.advance_day_phase(room_id)
-        rs = game_loop._get_room(room_id)
-        await db.execute(
-            "UPDATE rooms SET phase = $1, sp = $2, last_active = CURRENT_TIMESTAMP WHERE room_id = $3",
-            rs["dayPhase"], rs["currentSp"], room_id
-        )
-        # Ensure the broadcast includes fields the client expects
-        broadcast_data = {
-            **result,
-            "dayPhase": rs["dayPhase"],
-            "currentSp": rs["currentSp"],
-            "bmSubPhase": rs["bmSubPhase"],
-            "phaseStartTs": int(datetime.now().timestamp() * 1000),
-        }
-        await manager.broadcast_to_room(room_id, {"type": "day_phase_change", "data": broadcast_data})
-        return result
+        lock = _get_room_advance_lock(room_id)
+        async with lock:
+            rs = game_loop._get_room(room_id)
+            precondition_err = _validate_advance_precondition(rs, data)
+            if precondition_err:
+                raise HTTPException(status_code=409, detail=precondition_err)
+
+            result = game_loop.advance_day_phase(room_id)
+            now_ts = int(datetime.now().timestamp() * 1000)
+            rs = game_loop._get_room(room_id)
+            await db.execute(
+                "UPDATE rooms SET phase = $1, sp = $2, phase_start_ts = $3, last_active = CURRENT_TIMESTAMP WHERE room_id = $4",
+                rs["dayPhase"], rs["currentSp"], now_ts, room_id
+            )
+            # Ensure the broadcast includes fields the client expects
+            broadcast_data = {
+                **result,
+                "dayPhase": rs["dayPhase"],
+                "currentSp": rs["currentSp"],
+                "bmSubPhase": rs["bmSubPhase"],
+                "phaseStartTs": now_ts,
+            }
+            await manager.broadcast_to_room(room_id, {"type": "day_phase_change", "data": broadcast_data})
+            return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/rooms/{room_id}/engine/advance-bm")
-async def engine_advance_bm(room_id: str):
+async def engine_advance_bm(room_id: str, data: Optional[Dict[str, Any]] = None):
     """Advance within REALTIME phase (BM_OPEN→BM_CLOSE per SP)"""
     try:
-        result = game_loop.advance_bm(room_id)
-        rs = game_loop._get_room(room_id)
-        await db.execute(
-            "UPDATE rooms SET phase = $1, sp = $2, last_active = CURRENT_TIMESTAMP WHERE room_id = $3",
-            rs["dayPhase"], rs["currentSp"], room_id
-        )
+        lock = _get_room_advance_lock(room_id)
+        async with lock:
+            rs = game_loop._get_room(room_id)
+            precondition_err = _validate_advance_precondition(rs, data)
+            if precondition_err:
+                raise HTTPException(status_code=409, detail=precondition_err)
 
-        # Ensure the broadcast includes fields the client expects
-        broadcast_data = {
-            **result,
-            "dayPhase": rs["dayPhase"],
-            "currentSp": rs["currentSp"],
-            "bmSubPhase": rs["bmSubPhase"],
-            "phaseStartTs": int(datetime.now().timestamp() * 1000),
-        }
-        await manager.broadcast_to_room(room_id, {"type": "bm_advance", "data": broadcast_data})
+            result = game_loop.advance_bm(room_id)
+            now_ts = int(datetime.now().timestamp() * 1000)
+            rs = game_loop._get_room(room_id)
+            await db.execute(
+                "UPDATE rooms SET phase = $1, sp = $2, phase_start_ts = $3, last_active = CURRENT_TIMESTAMP WHERE room_id = $4",
+                rs["dayPhase"], rs["currentSp"], now_ts, room_id
+            )
 
-        # Broadcast server settlement for client-side logging/validation
-        # (client computes its own authoritative cash and persists via putPlayer)
-        settlement = result.get("settlement")
-        if settlement:
-            await manager.broadcast_to_room(room_id, {
-                "type": "server_settlement",
-                "sp": result.get("sp"),
-                "data": settlement,
-            })
+            # Ensure the broadcast includes fields the client expects
+            broadcast_data = {
+                **result,
+                "dayPhase": rs["dayPhase"],
+                "currentSp": rs["currentSp"],
+                "bmSubPhase": rs["bmSubPhase"],
+                "phaseStartTs": now_ts,
+            }
+            await manager.broadcast_to_room(room_id, {"type": "bm_advance", "data": broadcast_data})
 
-        return result
+            # Broadcast server settlement for client-side logging/validation
+            # (client computes its own authoritative cash and persists via putPlayer)
+            settlement = result.get("settlement")
+            if settlement:
+                await manager.broadcast_to_room(room_id, {
+                    "type": "server_settlement",
+                    "sp": result.get("sp"),
+                    "data": settlement,
+                })
+
+            return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1030,7 +1080,7 @@ async def engine_get_forecasts(room_id: str):
     try:
         rs = game_loop._get_room(room_id)
         forecasts = compute_forecasts(
-            rs["sp"], rs["scenarioId"], rs.get("publishedForecast")
+            rs.get("currentSp", 0), rs["scenarioId"], rs.get("publishedForecast")
         )
         return {"forecasts": forecasts}
     except Exception as e:

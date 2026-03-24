@@ -11,6 +11,7 @@ export default function MarketOverviewPanel({ phase, daOrderBook, daResult, idOr
     const isBmPhase = ["BM", "BM_OPEN", "BM_CLEAR", "BM_CLOSE", "SP_SETTLED", "REALTIME"].includes(phase);
     const isSettled = ["SETTLED", "RESULTS"].includes(phase);
     const isWaitPhase = ["FORECAST", "FORECAST_0", "FORECAST_1", "FORECAST_2"].includes(phase);
+    const isResultPhase = isSettled;
 
     return (
         <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>

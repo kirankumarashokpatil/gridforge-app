@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import SharedLayout from './SharedLayout';
 import { Tip } from '../shared/Tip';
-import { SYSTEM_PARAMS } from '../../shared/constants';
+import { SYSTEM_PARAMS, ROLES } from '../../shared/constants';
 import MarketOverviewPanel from '../shared/MarketOverviewPanel';
 import EventFeed from '../shared/EventFeed';
 import DACurveSubmission from '../DACurveSubmission';
@@ -81,10 +81,12 @@ export default function TraderScreen(props) {
     const [useExpertMode, setUseExpertMode] = useState(false); // Expert curve mode for traders
 
     const currentPos = contractPosition || 0;
+    const isDaPhase = ["DA", "IDA1", "IDA2"].includes(phase);
+    const isIdPhase = phase === "ID" || phase === "ID_ROUNDS";
 
     // Margin calculation: Starting cash + P&L + bonus from SYSTEM_PARAMS
     const margin = cash + SYSTEM_PARAMS.traderStartCapitalBonus;
-    const marginFloor = 1000;
+    const marginFloor = ROLES.TRADER.marginFloor || 0;
     const marginHeadroom = Math.max(0, margin - marginFloor);
     const marginPct = Math.min(100, (margin / 5000) * 100);
 
@@ -207,8 +209,8 @@ export default function TraderScreen(props) {
                             <p style={{ fontSize: 9, color: "#4d7a96", marginBottom: 16, lineHeight: 1.4 }}>Take a purely financial view on the market before physical delivery.</p>
 
                             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
-                                <ActionButton onClick={() => setDaMyBid(b => ({ ...b, side: "buy" }))} disabled={!["DA","IDA1","IDA2"].includes(phase)} active={daMyBid.side === "buy"} activeBg="#1de98b22" activeBorder="#1de98b" activeColor="#1de98b" label="BUY (Go Long)" />
-                                <ActionButton onClick={() => setDaMyBid(b => ({ ...b, side: "sell" }))} disabled={!["DA","IDA1","IDA2"].includes(phase)} active={daMyBid.side === "sell"} activeBg="#f0455a22" activeBorder="#f0455a" activeColor="#f0455a" label="SELL (Go Short)" />
+                                <ActionButton onClick={() => setDaMyBid(b => ({ ...b, side: "buy" }))} disabled={!isDaPhase} active={daMyBid.side === "buy"} activeBg="#1de98b22" activeBorder="#1de98b" activeColor="#1de98b" label="BUY (Go Long)" />
+                                <ActionButton onClick={() => setDaMyBid(b => ({ ...b, side: "sell" }))} disabled={!isDaPhase} active={daMyBid.side === "sell"} activeBg="#f0455a22" activeBorder="#f0455a" activeColor="#f0455a" label="SELL (Go Short)" />
                             </div>
 
                             <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
@@ -226,7 +228,7 @@ export default function TraderScreen(props) {
                                                 <input
                                                     type="number"
                                                     value={daMyBid.mw}
-                                                    disabled={!["DA","IDA1","IDA2"].includes(phase)}
+                                                    disabled={!isDaPhase}
                                                     onChange={e => setDaMyBid(b => ({ ...b, mw: e.target.value }))}
                                                     style={{
                                                         width: "100%",
@@ -250,12 +252,12 @@ export default function TraderScreen(props) {
                                 </div>
                                 <div style={{ flex: 1 }}>
                                     <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 4, display: "block" }}>PRICE LIMIT £/MWh</label>
-                                    <input type="number" value={daMyBid.price} disabled={!["DA","IDA1","IDA2"].includes(phase)} onChange={e => setDaMyBid(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "8px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#f5b222", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
+                                    <input type="number" value={daMyBid.price} disabled={!isDaPhase} onChange={e => setDaMyBid(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "8px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#f5b222", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
                                 </div>
                             </div>
 
-                            <button onClick={onDaSubmit} disabled={!["DA","IDA1","IDA2"].includes(phase) || !daMyBid.price || (() => { const priceLimit = parseFloat(daMyBid.price) || 50; const maxSafeMW = Math.floor(margin / (priceLimit * 0.5)); const currentMW = parseFloat(daMyBid.mw) || 0; return currentMW > maxSafeMW && daMyBid.mw !== ""; })()} style={{ width: "100%", padding: "12px", background: !["DA","IDA1","IDA2"].includes(phase) ? "#1a3045" : "#f5b222", border: "none", borderRadius: 8, color: !["DA","IDA1","IDA2"].includes(phase) ? "#4d7a96" : "#050e16", fontWeight: 900, fontSize: 12, cursor: !["DA","IDA1","IDA2"].includes(phase) ? "default" : "pointer", marginBottom: 16 }}>
-                                {!["DA","IDA1","IDA2"].includes(phase) ? "AWAITING DA PHASE..." : daSubmitted ? "UPDATE POSITION →" : "SUBMIT SPECULATIVE POSITION →"}
+                            <button onClick={onDaSubmit} disabled={!isDaPhase || !daMyBid.price || (() => { const priceLimit = parseFloat(daMyBid.price) || 50; const maxSafeMW = Math.floor(margin / (priceLimit * 0.5)); const currentMW = parseFloat(daMyBid.mw) || 0; return currentMW > maxSafeMW && daMyBid.mw !== ""; })()} style={{ width: "100%", padding: "12px", background: !isDaPhase ? "#1a3045" : "#f5b222", border: "none", borderRadius: 8, color: !isDaPhase ? "#4d7a96" : "#050e16", fontWeight: 900, fontSize: 12, cursor: !isDaPhase ? "default" : "pointer", marginBottom: 16 }}>
+                                {!isDaPhase ? "AWAITING DA PHASE..." : daSubmitted ? "UPDATE POSITION →" : "SUBMIT SPECULATIVE POSITION →"}
                             </button>
                         </div>
 
@@ -284,8 +286,8 @@ export default function TraderScreen(props) {
                             <p style={{ fontSize: 9, color: "#4d7a96", marginBottom: 16, lineHeight: 1.4 }}>Adjust or close your DA position based on updated market intel. Counter-trade to lock in profits or cut losses.</p>
 
                             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
-                                <ActionButton onClick={() => setIdMyOrder(b => ({ ...b, side: "buy" }))} disabled={idSubmitted || phase !== "ID"} active={idMyOrder.side === "buy"} activeBg="#1de98b22" activeBorder="#1de98b" activeColor="#1de98b" label="BUY (Go Long)" />
-                                <ActionButton onClick={() => setIdMyOrder(b => ({ ...b, side: "sell" }))} disabled={idSubmitted || phase !== "ID"} active={idMyOrder.side === "sell"} activeBg="#f0455a22" activeBorder="#f0455a" activeColor="#f0455a" label="SELL (Go Short)" />
+                                <ActionButton onClick={() => setIdMyOrder(b => ({ ...b, side: "buy" }))} disabled={idSubmitted || !isIdPhase} active={idMyOrder.side === "buy"} activeBg="#1de98b22" activeBorder="#1de98b" activeColor="#1de98b" label="BUY (Go Long)" />
+                                <ActionButton onClick={() => setIdMyOrder(b => ({ ...b, side: "sell" }))} disabled={idSubmitted || !isIdPhase} active={idMyOrder.side === "sell"} activeBg="#f0455a22" activeBorder="#f0455a" activeColor="#f0455a" label="SELL (Go Short)" />
                             </div>
 
                             <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
@@ -302,7 +304,7 @@ export default function TraderScreen(props) {
                                                 <input
                                                     type="number"
                                                     value={idMyOrder.mw}
-                                                    disabled={idSubmitted || phase !== "ID"}
+                                                    disabled={idSubmitted || !isIdPhase}
                                                     onChange={e => setIdMyOrder(b => ({ ...b, mw: e.target.value }))}
                                                     style={{
                                                         width: "100%",
@@ -326,12 +328,12 @@ export default function TraderScreen(props) {
                                 </div>
                                 <div style={{ flex: 1 }}>
                                     <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 4, display: "block" }}>PRICE LIMIT £/MWh</label>
-                                    <input type="number" value={idMyOrder.price} disabled={idSubmitted || phase !== "ID"} onChange={e => setIdMyOrder(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "8px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#38c0fc", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
+                                    <input type="number" value={idMyOrder.price} disabled={idSubmitted || !isIdPhase} onChange={e => setIdMyOrder(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "8px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#38c0fc", fontSize: 14, fontFamily: "'JetBrains Mono'" }} />
                                 </div>
                             </div>
 
-                            <button onClick={onIdSubmit} disabled={idSubmitted || phase !== "ID" || !idMyOrder.price || (() => { const priceLimit = parseFloat(idMyOrder.price) || 50; const maxSafeMW = Math.floor(margin / (priceLimit * 0.5)); const currentMW = parseFloat(idMyOrder.mw) || 0; return currentMW > maxSafeMW && idMyOrder.mw !== ""; })()} style={{ width: "100%", padding: "12px", background: idSubmitted || phase !== "ID" ? "#1a3045" : "#38c0fc", border: "none", borderRadius: 8, color: idSubmitted || phase !== "ID" ? "#4d7a96" : "#050e16", fontWeight: 900, fontSize: 12, cursor: idSubmitted || phase !== "ID" ? "default" : "pointer", marginBottom: 16 }}>
-                                {phase !== "ID" ? "AWAITING ID PHASE..." : idSubmitted ? "✓ ID ORDER PUBLISHED" : "SUBMIT ID ORDER →"}
+                            <button onClick={onIdSubmit} disabled={idSubmitted || !isIdPhase || !idMyOrder.price || (() => { const priceLimit = parseFloat(idMyOrder.price) || 50; const maxSafeMW = Math.floor(margin / (priceLimit * 0.5)); const currentMW = parseFloat(idMyOrder.mw) || 0; return currentMW > maxSafeMW && idMyOrder.mw !== ""; })()} style={{ width: "100%", padding: "12px", background: idSubmitted || !isIdPhase ? "#1a3045" : "#38c0fc", border: "none", borderRadius: 8, color: idSubmitted || !isIdPhase ? "#4d7a96" : "#050e16", fontWeight: 900, fontSize: 12, cursor: idSubmitted || !isIdPhase ? "default" : "pointer", marginBottom: 16 }}>
+                                {!isIdPhase ? "AWAITING ID PHASE..." : idSubmitted ? "✓ ID ORDER PUBLISHED" : "SUBMIT ID ORDER →"}
                             </button>
                         </div>
 

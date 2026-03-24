@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-const API_BASE = 'http://localhost:8000';
+const DEFAULT_API_BASE = `${window.location.protocol}//${window.location.hostname}:8000`;
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE).replace(/\/$/, '');
+const WS_BASE = (import.meta.env.VITE_WS_BASE_URL || API_BASE.replace(/^http/, 'ws')).replace(/\/$/, '');
 
 // Simple fetch wrapper
 async function api(method, endpoint, body = null) {
@@ -12,7 +14,16 @@ async function api(method, endpoint, body = null) {
   if (body) options.body = JSON.stringify(body);
   
   const res = await fetch(url, options);
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const payload = await res.json();
+      detail = payload?.detail || payload?.error || '';
+    } catch {
+      // ignore json parse errors and fall back to status only
+    }
+    throw new Error(detail ? `API error: ${res.status} ${detail}` : `API error: ${res.status}`);
+  }
   return res.json();
 }
 
@@ -27,7 +38,7 @@ export function useApi() {
     if (!room || wsRef.current?.readyState === WebSocket.OPEN) return;
     
     roomRef.current = room;
-    const ws = new WebSocket(`ws://localhost:8000/ws?room=${room}`);
+    const ws = new WebSocket(`${WS_BASE}/ws?room=${encodeURIComponent(room)}`);
     
     ws.onopen = () => {
       console.log('[WebSocket] Connected to room:', room);
@@ -158,8 +169,8 @@ export function useApi() {
     engineGetState: (roomId) => api('GET', `/api/rooms/${roomId}/engine/state`),
     engineGenerateMarket: (roomId, data) => api('POST', `/api/rooms/${roomId}/engine/market`, data || {}),
     engineAdvancePhase: (roomId) => api('POST', `/api/rooms/${roomId}/engine/advance`),
-    engineAdvanceDayPhase: (roomId) => api('POST', `/api/rooms/${roomId}/engine/advance-day`),
-    engineAdvanceBm: (roomId) => api('POST', `/api/rooms/${roomId}/engine/advance-bm`),
+    engineAdvanceDayPhase: (roomId, data) => api('POST', `/api/rooms/${roomId}/engine/advance-day`, data || {}),
+    engineAdvanceBm: (roomId, data) => api('POST', `/api/rooms/${roomId}/engine/advance-bm`, data || {}),
     engineClearBM: (roomId) => api('POST', `/api/rooms/${roomId}/engine/clear-bm`),
     engineClearDA: (roomId) => api('POST', `/api/rooms/${roomId}/engine/clear-da`),
     engineClearDACurves: (roomId) => api('POST', `/api/rooms/${roomId}/engine/clear-da-curves`),

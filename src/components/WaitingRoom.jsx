@@ -285,6 +285,8 @@ export default function WaitingRoom({
 
     const canStart = isHost &&
         activePlayers.length >= 2 &&
+        hasSupplySide &&
+        hasDemandSide &&
         allRolesAssigned &&
         allReady;
 
