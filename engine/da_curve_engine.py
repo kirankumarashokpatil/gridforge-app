@@ -165,17 +165,17 @@ def clear_single_sp(sp: int, player_curves: list[dict], market_ctx: dict | None 
 
     for s in sellers:
         vol = get_volume_at_price([s["segment"]], sp, clearing_price, "sell")
-        seller_vols[s["playerId"]] = vol
+        seller_vols[s["playerId"]] = seller_vols.get(s["playerId"], 0.0) + vol
         raw_total_supply += vol
-        pmax_map[s["playerId"]] = s["segment"]["pmax"]
+        pmax_map[s["playerId"]] = max(pmax_map.get(s["playerId"], 0.0), s["segment"]["pmax"])
 
     raw_total_demand = 0
     buyer_vols = {}
     for b in buyers:
         vol = get_volume_at_price([b["segment"]], sp, clearing_price, "buy")
-        buyer_vols[b["playerId"]] = vol
+        buyer_vols[b["playerId"]] = buyer_vols.get(b["playerId"], 0.0) + vol
         raw_total_demand += vol
-        pmax_map[b["playerId"]] = b["segment"]["pmax"]
+        pmax_map[b["playerId"]] = max(pmax_map.get(b["playerId"], 0.0), b["segment"]["pmax"])
 
     syn_demand_at_clear = max(0, syn_demand_mw * max(0, 1 - (clearing_price - syn_forecast_price) / 100))
     total_demand_at_clear = raw_total_demand + syn_demand_at_clear
@@ -206,6 +206,94 @@ def clear_single_sp(sp: int, player_curves: list[dict], market_ctx: dict | None 
 
 
 def clear_full_auction(player_curves: list[dict], market_ctx_array: list[dict] | None = None) -> dict:
+    """
+    Uniform-price clearing for all 48 SPs with optional simple block orders.
+
+    Block implementation (simplified, all-or-nothing):
+      - Each curve may include `blocks: [ { spStart, spEnd, mw, price, side } ]`
+      - First pass clears curves-only to obtain provisional prices.
+      - Blocks are accepted if in-the-money on average over their SP range:
+          sell block accepted when avg_price >= block.price
+          buy block accepted when avg_price <= block.price
+      - Accepted blocks are injected as price-independent synthetic segments
+        and the auction is re-cleared in a second pass.
+
+    This preserves uniform pay-as-clear pricing while keeping complexity low.
+    """
+
+    def _valid_block(b: dict) -> bool:
+        if not isinstance(b, dict):
+            return False
+        try:
+            s0 = int(b.get("spStart", 0))
+            s1 = int(b.get("spEnd", 0))
+            mw = float(b.get("mw", 0))
+            _ = float(b.get("price", 0))
+        except Exception:
+            return False
+        return 1 <= s0 <= s1 <= 48 and mw > 0
+
+    def _normalize_blocks(curve: dict) -> list[dict]:
+        out = []
+        for b in curve.get("blocks", []) or []:
+            if not _valid_block(b):
+                continue
+            side = b.get("side") or curve.get("side", "sell")
+            side = "buy" if str(side).lower() == "buy" else "sell"
+            out.append({
+                "id": b.get("id") or f"blk_{curve['playerId']}_{len(out)+1}",
+                "playerId": curve["playerId"],
+                "side": side,
+                "spStart": int(b["spStart"]),
+                "spEnd": int(b["spEnd"]),
+                "mw": float(b["mw"]),
+                "price": float(b["price"]),
+            })
+        return out
+
+    def _accepted_blocks(blocks: list[dict], price_array: list[float]) -> tuple[list[dict], list[dict]]:
+        accepted, rejected = [], []
+        for b in blocks:
+            i0, i1 = b["spStart"] - 1, b["spEnd"] - 1
+            span = price_array[i0:i1 + 1]
+            if not span:
+                rejected.append({**b, "reason": "empty_span"})
+                continue
+            avg_price = sum(span) / len(span)
+            in_money = (avg_price <= b["price"]) if b["side"] == "buy" else (avg_price >= b["price"])
+            if in_money:
+                accepted.append({**b, "avgPrice": round(avg_price, 2)})
+            else:
+                rejected.append({**b, "avgPrice": round(avg_price, 2), "reason": "out_of_money"})
+        return accepted, rejected
+
+    def _inject_blocks(base_curves: list[dict], blocks: list[dict]) -> list[dict]:
+        augmented = [dict(c) for c in base_curves]
+        for b in blocks:
+            # Price-independent synthetic segment over block span.
+            # sell: always available; buy: always demanded (within auction bounds).
+            if b["side"] == "sell":
+                p1 = p2 = 0.0
+            else:
+                p1 = p2 = 300.0
+            augmented.append({
+                "playerId": b["playerId"],
+                "side": b["side"],
+                "segments": [{
+                    "id": f"{b['id']}_seg",
+                    "spStart": b["spStart"],
+                    "spEnd": b["spEnd"],
+                    "pmin": b["mw"],
+                    "pmax": b["mw"],
+                    "price1": p1,
+                    "price2": p2,
+                    "name": f"Block {b['id']}",
+                }],
+                "_isSyntheticBlock": True,
+                "_blockId": b["id"],
+            })
+        return augmented
+
     prices = [0.0] * 48
     volumes: dict[str, list[float]] = {}
     pmax_arrays: dict[str, list[float]] = {}
@@ -234,6 +322,43 @@ def clear_full_auction(player_curves: list[dict], market_ctx_array: list[dict] |
             "totalSupply": result["totalSupply"],
         })
 
+    # Two-pass block acceptance using provisional prices.
+    all_blocks = []
+    for curve in player_curves:
+        all_blocks.extend(_normalize_blocks(curve))
+
+    accepted_blocks: list[dict] = []
+    rejected_blocks: list[dict] = []
+    if all_blocks:
+        accepted_blocks, rejected_blocks = _accepted_blocks(all_blocks, prices)
+
+        # Re-clear with accepted blocks injected as price-independent orders.
+        augmented_curves = _inject_blocks(player_curves, accepted_blocks)
+        prices = [0.0] * 48
+        for pid in volumes:
+            volumes[pid] = [0.0] * 48
+            pmax_arrays[pid] = [0.0] * 48
+        sp_details = []
+
+        for sp in range(1, 49):
+            ctx = market_ctx_array[sp - 1] if market_ctx_array else None
+            result = clear_single_sp(sp, augmented_curves, ctx)
+            prices[sp - 1] = result["clearingPrice"]
+
+            for player_id, vol in result["volumes"].items():
+                if player_id in volumes:
+                    volumes[player_id][sp - 1] = vol
+            for player_id, pm in result.get("pmax", {}).items():
+                if player_id in pmax_arrays:
+                    pmax_arrays[player_id][sp - 1] = pm
+
+            sp_details.append({
+                "sp": sp,
+                "clearingPrice": result["clearingPrice"],
+                "totalDemand": result["totalDemand"],
+                "totalSupply": result["totalSupply"],
+            })
+
     total_traded = sum(abs(v) for vols in volumes.values() for v in vols) / 2
 
     return {
@@ -242,6 +367,8 @@ def clear_full_auction(player_curves: list[dict], market_ctx_array: list[dict] |
         "pmax": pmax_arrays,
         "spDetails": sp_details,
         "totalTradedMW": total_traded,
+        "acceptedBlocks": accepted_blocks,
+        "rejectedBlocks": rejected_blocks,
     }
 
 

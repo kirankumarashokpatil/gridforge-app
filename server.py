@@ -142,6 +142,7 @@ class Database:
                     room_id TEXT NOT NULL,
                     player_id TEXT NOT NULL,
                     segments JSONB,
+                    blocks JSONB,
                     side TEXT,
                     name TEXT,
                     asset TEXT,
@@ -151,6 +152,8 @@ class Database:
                     UNIQUE(room_id, player_id),
                     FOREIGN KEY (room_id) REFERENCES rooms(room_id)
                 );
+
+                ALTER TABLE da_curves ADD COLUMN IF NOT EXISTS blocks JSONB;
                 
                 CREATE TABLE IF NOT EXISTS id_bids (
                     bid_id SERIAL PRIMARY KEY,
@@ -605,13 +608,19 @@ async def put_bm_bid(room_id: str, sp: int, player_id: str, bid: Dict[str, Any])
 # ==================== DA BIDS ENDPOINTS ====================
 
 @app.get("/api/rooms/{room_id}/da/{cycle}")
-async def get_da_bids(room_id: str, cycle: int):
+async def get_da_bids(room_id: str, cycle: int, player_id: Optional[str] = None):
     """Get DA bids for cycle"""
     try:
-        result = await db.query(
-            "SELECT * FROM da_bids WHERE room_id = $1 AND cycle = $2",
-            room_id, cycle
-        )
+        if player_id:
+            result = await db.query(
+                "SELECT * FROM da_bids WHERE room_id = $1 AND cycle = $2 AND player_id = $3",
+                room_id, cycle, player_id
+            )
+        else:
+            result = await db.query(
+                "SELECT * FROM da_bids WHERE room_id = $1 AND cycle = $2",
+                room_id, cycle
+            )
         return [dict(row) for row in result]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -655,10 +664,11 @@ async def put_da_curve(room_id: str, player_id: str, curve: Dict[str, Any]):
     try:
         await db.execute(
             '''INSERT INTO da_curves 
-               (room_id, player_id, segments, side, name, asset, col, ts)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               (room_id, player_id, segments, blocks, side, name, asset, col, ts)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (room_id, player_id) DO UPDATE SET
                segments = EXCLUDED.segments,
+               blocks = EXCLUDED.blocks,
                side = EXCLUDED.side,
                name = EXCLUDED.name,
                asset = EXCLUDED.asset,
@@ -666,12 +676,24 @@ async def put_da_curve(room_id: str, player_id: str, curve: Dict[str, Any]):
                ts = EXCLUDED.ts''',
             room_id, player_id,
             json.dumps(curve.get("segments", [])),
+            json.dumps(curve.get("blocks", [])),
             curve.get("side"),
             curve.get("name"),
             curve.get("asset"),
             curve.get("col"),
             curve.get("ts", int(datetime.now().timestamp() * 1000))
         )
+
+        # Keep authoritative in-memory game loop in sync with persisted curve state.
+        game_loop.submit_da_curve(room_id, player_id, {
+            "segments": curve.get("segments", []),
+            "blocks": curve.get("blocks", []),
+            "side": curve.get("side", "sell"),
+            "name": curve.get("name"),
+            "asset": curve.get("asset"),
+            "col": curve.get("col"),
+            "ts": curve.get("ts", int(datetime.now().timestamp() * 1000)),
+        })
         
         await manager.broadcast_to_room(room_id, {"type": "da_curve", "player_id": player_id, "data": curve})
         return {"success": True}
@@ -681,13 +703,19 @@ async def put_da_curve(room_id: str, player_id: str, curve: Dict[str, Any]):
 # ==================== ID BIDS ENDPOINTS ====================
 
 @app.get("/api/rooms/{room_id}/id/{sp}")
-async def get_id_bids(room_id: str, sp: int):
+async def get_id_bids(room_id: str, sp: int, player_id: Optional[str] = None):
     """Get ID bids for SP"""
     try:
-        result = await db.query(
-            "SELECT * FROM id_bids WHERE room_id = $1 AND sp = $2",
-            room_id, sp
-        )
+        if player_id:
+            result = await db.query(
+                "SELECT * FROM id_bids WHERE room_id = $1 AND sp = $2 AND player_id = $3",
+                room_id, sp, player_id
+            )
+        else:
+            result = await db.query(
+                "SELECT * FROM id_bids WHERE room_id = $1 AND sp = $2",
+                room_id, sp
+            )
         return [dict(row) for row in result]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -966,10 +994,14 @@ async def engine_clear_da_curves(room_id: str):
             segments = row_dict.get("segments")
             if isinstance(segments, str):
                 segments = json.loads(segments)
+            blocks = row_dict.get("blocks")
+            if isinstance(blocks, str):
+                blocks = json.loads(blocks)
             player_curves.append({
                 "playerId": row_dict["player_id"],
                 "segments": segments or [],
                 "side": row_dict.get("side", "sell"),
+                "blocks": blocks or [],
             })
 
         # Build market context from forecast

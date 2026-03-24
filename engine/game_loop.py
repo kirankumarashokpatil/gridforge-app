@@ -469,6 +469,70 @@ def _apply_accepted_to_positions(rs: dict, sp: int, accepted_bids: list[dict]) -
 
 def _on_da_close_all(rs: dict) -> dict:
     """Clear DA auction for all 48 SPs simultaneously."""
+    # If players submitted full curves, use uniform 48-SP curve auction.
+    if rs.get("daCurves"):
+        player_curves = []
+        for pid, curve in rs["daCurves"].items():
+            if not isinstance(curve, dict):
+                continue
+            player_curves.append({
+                "playerId": pid,
+                "segments": curve.get("segments", []),
+                "side": curve.get("side", "sell"),
+                "blocks": curve.get("blocks", []),
+            })
+
+        market_ctx = []
+        for sp in range(1, SPS_PER_DAY + 1):
+            mkt = rs["markets"].get(sp, {})
+            fc = mkt.get("forecast", {})
+            market_ctx.append({
+                "demandMW": max(0.0, float(fc.get("demandMw", 300) or 300)),
+                "forecastPrice": float(fc.get("baseRef", 50) or 50),
+            })
+
+        curve_result = clear_full_auction(player_curves, market_ctx)
+
+        # Map curve result into per-SP structure expected by existing UI/state.
+        all_results = {}
+        for sp in range(1, SPS_PER_DAY + 1):
+            cp = curve_result["prices"][sp - 1]
+            accepted_bids = []
+            for pid, vols in curve_result.get("volumes", {}).items():
+                vol = vols[sp - 1]
+                if abs(vol) <= 0:
+                    continue
+                side = "offer" if vol < 0 else "bid"
+                mw_acc = abs(vol)
+                revenue = (mw_acc * cp * SP_DURATION_H) * (1 if side == "offer" else -1)
+                accepted_bids.append({
+                    "id": pid,
+                    "player_id": pid,
+                    "side": side,
+                    "mwAcc": mw_acc,
+                    "revenue": revenue,
+                    "price": cp,
+                })
+
+                # Update contracted position and cash.
+                rs["positions"].setdefault(pid, {})[sp] = (
+                    rs["positions"].get(pid, {}).get(sp, 0) - vol
+                )
+                if pid in rs["playerStates"]:
+                    rs["playerStates"][pid]["cash"] = rs["playerStates"][pid].get("cash", 0) + revenue
+                    rs["playerStates"][pid]["daCash"] = rs["playerStates"][pid].get("daCash", 0) + revenue
+
+            total_volume = sum(b["mwAcc"] for b in accepted_bids if b["side"] == "offer")
+            all_results[sp] = {"cp": cp, "volume": total_volume, "accepted_bids": accepted_bids}
+
+        rs["daResults"] = all_results
+        return {
+            "daResults": all_results,
+            "spsCleared": len(all_results),
+            "acceptedBlocks": curve_result.get("acceptedBlocks", []),
+            "rejectedBlocks": curve_result.get("rejectedBlocks", []),
+        }
+
     all_results = {}
     for sp in range(1, SPS_PER_DAY + 1):
         market = rs["markets"].get(sp)
@@ -500,6 +564,73 @@ def _on_ida_close_all(rs: dict, ida_round: str) -> dict:
     result_key = f"{ida_round.lower()}Results"
     ida_cfg = IDA_CONFIG.get(ida_round, {})
     err_reduction = ida_cfg.get("forecastErrorReduction", 0.5)
+
+    # If full curves exist, clear IDA rounds using the same curve auction model.
+    if rs.get("daCurves"):
+        market_ctx = []
+        for sp in range(1, SPS_PER_DAY + 1):
+            market = rs["markets"].get(sp)
+            if not market:
+                market_ctx.append({"demandMW": 300.0, "forecastPrice": 50.0})
+                continue
+            updated_fc = ida_forecast(market, err_reduction)
+            market[f"{ida_round.lower()}Forecast"] = updated_fc
+            market_ctx.append({
+                "demandMW": max(0.0, float(updated_fc.get("demandMw", 300) or 300)),
+                "forecastPrice": float(updated_fc.get("baseRef", 50) or 50),
+            })
+
+        player_curves = []
+        for pid, curve in rs["daCurves"].items():
+            if not isinstance(curve, dict):
+                continue
+            player_curves.append({
+                "playerId": pid,
+                "segments": curve.get("segments", []),
+                "side": curve.get("side", "sell"),
+                "blocks": curve.get("blocks", []),
+            })
+
+        curve_result = clear_full_auction(player_curves, market_ctx)
+        all_results = {}
+        for sp in range(1, SPS_PER_DAY + 1):
+            cp = curve_result["prices"][sp - 1]
+            accepted_bids = []
+            for pid, vols in curve_result.get("volumes", {}).items():
+                vol = vols[sp - 1]
+                if abs(vol) <= 0:
+                    continue
+                side = "offer" if vol < 0 else "bid"
+                mw_acc = abs(vol)
+                revenue = (mw_acc * cp * SP_DURATION_H) * (1 if side == "offer" else -1)
+                accepted_bids.append({
+                    "id": pid,
+                    "player_id": pid,
+                    "side": side,
+                    "mwAcc": mw_acc,
+                    "revenue": revenue,
+                    "price": cp,
+                })
+
+                rs["positions"].setdefault(pid, {})[sp] = (
+                    rs["positions"].get(pid, {}).get(sp, 0) - vol
+                )
+                if pid in rs["playerStates"]:
+                    rs["playerStates"][pid]["cash"] = rs["playerStates"][pid].get("cash", 0) + revenue
+
+            all_results[sp] = {
+                "cp": cp,
+                "volume": sum(b["mwAcc"] for b in accepted_bids if b["side"] == "offer"),
+                "accepted_bids": accepted_bids,
+                "updatedForecast": rs["markets"].get(sp, {}).get(f"{ida_round.lower()}Forecast", {}),
+            }
+
+        rs[result_key] = all_results
+        return {
+            f"{ida_round.lower()}Results": all_results,
+            "acceptedBlocks": curve_result.get("acceptedBlocks", []),
+            "rejectedBlocks": curve_result.get("rejectedBlocks", []),
+        }
 
     all_results = {}
     for sp in range(1, SPS_PER_DAY + 1):

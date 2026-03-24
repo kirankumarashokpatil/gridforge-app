@@ -1393,8 +1393,14 @@ export default function App() {
   }, [daMyBid, api, daSubmitted, addToast]);
 
   // ─── EPEX DA CURVE SUBMISSION (piecewise linear segments for all 48 SPs) ───
-  const submitDaCurve = useCallback((segments) => {
+  const submitDaCurve = useCallback((curvePayload) => {
     const { pid: id, name: n, room: rm, asset: ak, role } = refs.current;
+    const segments = Array.isArray(curvePayload)
+      ? curvePayload
+      : (curvePayload?.segments || []);
+    const blocks = Array.isArray(curvePayload?.blocks)
+      ? curvePayload.blocks
+      : [];
     if (!id || !api || !segments || segments.length === 0) return;
     const def = ASSETS[ak] || {};
     // Determine side from asset type: generators/BESS sell, suppliers buy, traders both
@@ -1403,6 +1409,7 @@ export default function App() {
     // Submit curve segments via API
     api.putDaCurve(rm, id, {
       segments,
+      blocks,
       side,
       name: n,
       asset: ak,
@@ -1413,7 +1420,8 @@ export default function App() {
     setDaSubmitted(true);
     const totalSPs = segments.reduce((s, seg) => s + (seg.spEnd - seg.spStart + 1), 0);
     const maxVol = Math.max(...segments.map(s => s.pmax));
-    addToast({ emoji: "📋", title: "DA Curve Submitted", body: `${segments.length} segments, ${totalSPs} SPs, up to ${f0(maxVol)}MW`, col: "#f5b222" });
+    const blockText = blocks.length ? `, ${blocks.length} blocks` : "";
+    addToast({ emoji: "📋", title: "DA Curve Submitted", body: `${segments.length} segments${blockText}, ${totalSPs} SPs, up to ${f0(maxVol)}MW`, col: "#f5b222" });
   }, [api, addToast]);
 
   const submitIdOrder = useCallback(() => {
@@ -1521,14 +1529,36 @@ export default function App() {
         </div>
       );
     }
+
+    const allIdOrders = Object.values(idOrderBook).filter(b => b && b.mw);
+    const allDaOrders = Object.values(daOrderBook).filter(b => b && b.mw);
+    const isAuctionPhase = ["DA", "IDA1", "IDA2"].includes(phase);
+    const isBookViewer = isInstructor || role === "NESO";
+    const ownOnly = (b) => {
+      const bidPid = b?.id || b?.player_id || b?.playerId;
+      return bidPid && bidPid === pid;
+    };
+
+    // Blind order-book behaviour: during auction phases, participants only see
+    // their own submitted auction orders until gate closure.
+    const visibleDaOrders = (isAuctionPhase && !isBookViewer)
+      ? allDaOrders.filter(ownOnly)
+      : allDaOrders;
+
+    // Keep ID order visibility unchanged outside auction phases, but align DA/IDA
+    // tabs to own-order view while auctions are open.
+    const visibleIdOrders = (isAuctionPhase && !isBookViewer)
+      ? allIdOrders.filter(ownOnly)
+      : allIdOrders;
+
     const commonProps = {
       market, sp, msLeft, phase, tickSpeed, spContracts, pid, cash, daCash, spHistory, leaderboard, assetKey: asset,
       day, bmSubPhase,
       myBid, setMyBid, submitted, onSubmit: submitBid,
       daMyBid, setDaMyBid, daSubmitted, onDaSubmit: submitDaBid,
       idMyOrder, setIdMyOrder, idSubmitted, onIdSubmit: submitIdOrder,
-      idOrderBook: Object.values(idOrderBook).filter(b => b && b.mw),
-      daOrderBook: Object.values(daOrderBook).filter(b => b && b.mw),
+      idOrderBook: visibleIdOrders,
+      daOrderBook: visibleDaOrders,
       daResult, currentSp: sp, simRes: lastRes, bmOrderBook: allBids,
       allBids, lastRes, forecasts, publishedForecast, playerName: name, room, scenario: sc,
       isInstructor, paused, freqBreachSec, contractPosition, imbalancePenalty, earnedAchievements, gameMode, role,

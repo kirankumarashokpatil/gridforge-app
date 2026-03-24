@@ -351,6 +351,7 @@ export default function DACurveSubmission({
   onSubmit, 
   forecastPrices = new Array(48).fill(55),
   initialSegments = DEFAULT_DA_SEGMENTS,
+  initialBlocks = [],
   assetMaxMW = 100,
   daSubmitted = false
 }) {
@@ -360,6 +361,17 @@ export default function DACurveSubmission({
   })));
   const [validation, setValidation] = useState({ valid: true, errors: [], isComplete: true });
   const [showPreview, setShowPreview] = useState(true);
+  const [blocks, setBlocks] = useState(
+    (initialBlocks || []).map((b, i) => ({
+      id: b.id || `blk_${Date.now()}_${i}`,
+      spStart: Math.max(1, Math.min(48, Number(b.spStart || 1))),
+      spEnd: Math.max(1, Math.min(48, Number(b.spEnd || 2))),
+      mw: Math.max(0, Number(b.mw || 0)),
+      price: Number(b.price || 50),
+      side: b.side === 'buy' ? 'buy' : 'sell',
+      name: b.name || `Block ${i + 1}`,
+    }))
+  );
   
   // Scale Pmax to asset capacity
   const scaledSegments = useMemo(() => {
@@ -395,7 +407,41 @@ export default function DACurveSubmission({
   
   const handleSubmit = () => {
     if (!validation.valid) return;
-    onSubmit(scaledSegments);
+    const validBlocks = blocks
+      .filter(b => b.mw > 0 && b.spStart >= 1 && b.spEnd <= 48 && b.spStart <= b.spEnd)
+      .map(b => ({
+        id: b.id,
+        spStart: Number(b.spStart),
+        spEnd: Number(b.spEnd),
+        mw: Number(b.mw),
+        price: Number(b.price),
+        side: b.side,
+        name: b.name,
+      }));
+    onSubmit({ segments: scaledSegments, blocks: validBlocks });
+  };
+
+  const handleAddBlock = () => {
+    setBlocks(prev => ([
+      ...prev,
+      {
+        id: `blk_${Date.now()}_${prev.length + 1}`,
+        spStart: 1,
+        spEnd: 2,
+        mw: 10,
+        price: 55,
+        side: 'sell',
+        name: `Block ${prev.length + 1}`,
+      }
+    ]));
+  };
+
+  const updateBlock = (id, patch) => {
+    setBlocks(prev => prev.map(b => b.id === id ? { ...b, ...patch } : b));
+  };
+
+  const deleteBlock = (id) => {
+    setBlocks(prev => prev.filter(b => b.id !== id));
   };
   
   return (
@@ -551,6 +597,110 @@ export default function DACurveSubmission({
           + Add Segment
         </button>
       </div>
+
+      {/* Optional block orders */}
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ 
+          fontSize: 10, 
+          color: '#64748b', 
+          fontWeight: 700, 
+          letterSpacing: 1,
+          marginBottom: 10,
+          textTransform: 'uppercase'
+        }}>
+          Block Orders (All-or-Nothing)
+        </div>
+
+        {blocks.map((b) => (
+          <div key={b.id} style={{
+            background: '#0b1722',
+            border: '1px solid #1a3045',
+            borderRadius: 8,
+            padding: '10px 12px',
+            marginBottom: 8,
+          }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '70px 90px 90px 80px 80px 1fr 28px', gap: 8, alignItems: 'center' }}>
+              <select
+                value={b.side}
+                onChange={(e) => updateBlock(b.id, { side: e.target.value })}
+                style={{ background: '#08141f', border: '1px solid #1a3045', borderRadius: 4, color: '#ddeeff', fontSize: 11, padding: '4px 6px' }}
+              >
+                <option value="sell">SELL</option>
+                <option value="buy">BUY</option>
+              </select>
+              <input
+                type="number"
+                min={1}
+                max={48}
+                value={b.spStart}
+                onChange={(e) => updateBlock(b.id, { spStart: Number(e.target.value || 1) })}
+                style={{ background: '#08141f', border: '1px solid #1a3045', borderRadius: 4, color: '#ddeeff', fontSize: 11, padding: '4px 6px' }}
+                placeholder="SP start"
+              />
+              <input
+                type="number"
+                min={1}
+                max={48}
+                value={b.spEnd}
+                onChange={(e) => updateBlock(b.id, { spEnd: Number(e.target.value || 1) })}
+                style={{ background: '#08141f', border: '1px solid #1a3045', borderRadius: 4, color: '#ddeeff', fontSize: 11, padding: '4px 6px' }}
+                placeholder="SP end"
+              />
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={b.mw}
+                onChange={(e) => updateBlock(b.id, { mw: Number(e.target.value || 0) })}
+                style={{ background: '#08141f', border: '1px solid #1a3045', borderRadius: 4, color: '#ddeeff', fontSize: 11, padding: '4px 6px' }}
+                placeholder="MW"
+              />
+              <input
+                type="number"
+                step={1}
+                value={b.price}
+                onChange={(e) => updateBlock(b.id, { price: Number(e.target.value || 0) })}
+                style={{ background: '#08141f', border: '1px solid #1a3045', borderRadius: 4, color: '#ddeeff', fontSize: 11, padding: '4px 6px' }}
+                placeholder="£/MWh"
+              />
+              <input
+                type="text"
+                value={b.name}
+                onChange={(e) => updateBlock(b.id, { name: e.target.value })}
+                style={{ background: '#08141f', border: '1px solid #1a3045', borderRadius: 4, color: '#94a3b8', fontSize: 11, padding: '4px 6px' }}
+                placeholder="Block name"
+              />
+              <button
+                onClick={() => deleteBlock(b.id)}
+                style={{ background: 'transparent', border: 'none', color: '#f0455a', cursor: 'pointer', fontSize: 14, fontWeight: 700 }}
+                title="Delete block"
+              >
+                ×
+              </button>
+            </div>
+            <div style={{ marginTop: 6, fontSize: 9, color: '#64748b' }}>
+              AON block: either fully accepted across SP {b.spStart}-{b.spEnd}, or fully rejected.
+            </div>
+          </div>
+        ))}
+
+        <button
+          onClick={handleAddBlock}
+          style={{
+            width: '100%',
+            padding: '8px',
+            background: '#08141f',
+            border: '1px dashed #1a3045',
+            borderRadius: 8,
+            color: '#64748b',
+            fontSize: 11,
+            fontWeight: 700,
+            cursor: 'pointer',
+          }}
+        >
+          + Add Block Order
+        </button>
+      </div>
       
       {/* Legend */}
       <div style={{ 
@@ -572,6 +722,9 @@ export default function DACurveSubmission({
         </div>
         <div>
           - Auction extracts your volume where market clearing price intersects your slope
+        </div>
+        <div style={{ marginTop: 4 }}>
+          - Optional blocks are all-or-nothing across their SP range
         </div>
       </div>
       
