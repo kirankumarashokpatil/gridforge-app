@@ -777,9 +777,10 @@ async def engine_advance_day_phase(room_id: str, data: Optional[Dict[str, Any]] 
             result = game_loop.advance_day_phase(room_id)
             now_ts = int(datetime.now().timestamp() * 1000)
             rs = game_loop._get_room(room_id)
+            db_sp = max(1, rs["currentSp"])  # engine uses 0 as sentinel for non-REALTIME; DB requires sp >= 1
             await db.execute(
                 "UPDATE rooms SET phase = $1, sp = $2, phase_start_ts = $3, last_active = CURRENT_TIMESTAMP WHERE room_id = $4",
-                rs["dayPhase"], rs["currentSp"], now_ts, room_id
+                rs["dayPhase"], db_sp, now_ts, room_id
             )
             # Ensure the broadcast includes fields the client expects
             broadcast_data = {
