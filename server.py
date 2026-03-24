@@ -382,6 +382,18 @@ async def get_players(room_id: str):
         for row in result:
             p = dict(row)
             p["id"] = p.get("player_id")  # Add 'id' alias for frontend compatibility
+            # Hydrate transient preference fields from persisted custom_config.
+            cfg = p.get("custom_config") or {}
+            if isinstance(cfg, str):
+                try:
+                    cfg = json.loads(cfg)
+                except Exception:
+                    cfg = {}
+            if isinstance(cfg, dict):
+                if cfg.get("preferredRole") is not None:
+                    p["preferredRole"] = cfg.get("preferredRole")
+                if cfg.get("preferredAssetKey") is not None:
+                    p["preferredAssetKey"] = cfg.get("preferredAssetKey")
             players.append(p)
         return players
     except Exception as e:
@@ -442,6 +454,33 @@ async def put_player(room_id: str, player_id: str, data: Dict[str, Any]):
             "ready": "status",  # ready flag maps to status column
             "assignedAssetKey": "asset",
         }
+
+        # Persist waiting-room preference fields in custom_config so they survive
+        # polling, reconnects, and page refreshes.
+        pref_keys = {"preferredRole", "preferredAssetKey"}
+        if any(k in data for k in pref_keys):
+            existing_cfg = {}
+            current = await db.query(
+                "SELECT custom_config FROM players WHERE player_id = $1 AND room_id = $2",
+                player_id, room_id
+            )
+            if current:
+                raw_cfg = dict(current[0]).get("custom_config")
+                if isinstance(raw_cfg, dict):
+                    existing_cfg = raw_cfg
+                elif isinstance(raw_cfg, str) and raw_cfg:
+                    try:
+                        existing_cfg = json.loads(raw_cfg)
+                    except Exception:
+                        existing_cfg = {}
+
+            if "preferredRole" in data:
+                existing_cfg["preferredRole"] = data.get("preferredRole")
+            if "preferredAssetKey" in data:
+                existing_cfg["preferredAssetKey"] = data.get("preferredAssetKey")
+
+            # Inject merged config so the generic update logic persists it.
+            data = {**data, "custom_config": existing_cfg}
 
         updates = []
         values = []
