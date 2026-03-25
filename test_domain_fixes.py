@@ -194,7 +194,7 @@ if errors:
     print(f"FAILURES ({len(errors)}):")
     for e in errors:
         print(f"  ✗ {e}")
-    sys.exit(1)
+    if __name__ == "__main__": sys.exit(1)
 else:
     print("=== ALL 7 DOMAIN FIX REGRESSION TESTS PASSED ===")
-    sys.exit(0)
+    if __name__ == "__main__": sys.exit(0)

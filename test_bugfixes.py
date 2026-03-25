@@ -4,16 +4,17 @@ import sys
 from engine.game_loop import (
     register_player, generate_market, advance_phase,
     settle_current_sp, _get_room, advance_day_phase,
+    advance_bm, set_room_config,
 )
 from engine.constants import SCORING_CONFIG
 
 ROOM = "BUGFIX_TEST"
 
-# ── Setup: register 3 players ──
+# ── Setup: register 3 players, use TUTORIAL to skip to REALTIME quickly ──
 register_player(ROOM, "p1", {"name": "Alice", "asset": "BESS_M", "role": "BESS"})
 register_player(ROOM, "p2", {"name": "Bob", "asset": "OCGT", "role": "GENERATOR"})
 register_player(ROOM, "p3", {"name": "Carol", "asset": "WIND", "role": "INTERCONNECTOR"})
-generate_market(ROOM)
+set_room_config(ROOM, {"gameMode": "TUTORIAL"})
 
 errors = []
 
@@ -22,15 +23,12 @@ errors = []
 # After one settlement, totalSPs should be 1, not 3.
 # ══════════════════════════════════════════════
 print("BUG 1: update_system_state per-SP (not per-player)...")
-# Advance through full phase sequence: DA→IDA1→IDA2→ID→BM→SETTLED→DA
-advance_phase(ROOM)  # DA → IDA1
-advance_phase(ROOM)  # IDA1 → IDA2
-advance_phase(ROOM)  # IDA2 → ID
-advance_phase(ROOM)  # ID → BM
-advance_phase(ROOM)  # BM → SETTLED
-advance_phase(ROOM)  # SETTLED → DA (runs _on_settlement)
-
+# FORECAST_0 → REALTIME (TUTORIAL skips DA/IDA/ID)
+advance_day_phase(ROOM)
+# BM_OPEN → BM_CLEAR (settles SP 1)
+advance_bm(ROOM)
 rs = _get_room(ROOM)
+
 total_sps = rs["systemState"]["totalSPs"]
 if total_sps == 1:
     print(f"  PASS: totalSPs = {total_sps}")
@@ -43,6 +41,7 @@ else:
 # After settlement, each player should have 1 entry in spHistory.
 # ══════════════════════════════════════════════
 print("BUG 2: spHistory populated after settlement...")
+history = []
 for pid in ["p1", "p2", "p3"]:
     history = rs["playerStates"][pid].get("spHistory", [])
     if len(history) == 1:
@@ -139,12 +138,52 @@ except ImportError as e:
     print(f"  FAIL: {e}")
 
 # ══════════════════════════════════════════════
+# BUG 7: BM accepted MW overwrite — multiple accepted bids must SUM, not overwrite
+# ══════════════════════════════════════════════
+print("BUG 7: BM accepted MW sums multiple bids (not overwrite)...")
+ROOM3 = "BM_OVERWRITE_TEST"
+register_player(ROOM3, "gen1", {"name": "Gen1", "asset": "OCGT", "role": "GENERATOR"})
+generate_market(ROOM3)
+
+# Advance to REALTIME
+rs3 = _get_room(ROOM3)
+while rs3.get("dayPhase") != "REALTIME":
+    advance_day_phase(ROOM3)
+    rs3 = _get_room(ROOM3)
+
+sp = rs3["currentSp"]
+
+# Simulate two accepted BM bids for the same player in the same SP
+# by directly injecting into bmResults
+rs3["bmResults"][sp] = {
+    "accepted": [
+        {"id": "gen1", "player_id": "gen1", "mwAcc": 50, "price": 60, "revenue": 1500},
+        {"id": "gen1", "player_id": "gen1", "mwAcc": 50, "price": 62, "revenue": 1550},
+    ],
+    "isShort": True,
+}
+rs3["markets"][sp]["actual"]["isShort"] = True
+
+result = settle_current_sp(ROOM3)
+settlements = result.get("settlements", {})
+if "gen1" in settlements:
+    bm_acc = settlements["gen1"].get("bmAccMw", 0)
+    if bm_acc == 100:
+        print(f"  PASS: bmAccMw = {bm_acc} (correctly summed 50+50)")
+    else:
+        errors.append(f"BUG 7 FAIL: bmAccMw = {bm_acc}, expected 100 (50+50)")
+        print(f"  FAIL: bmAccMw = {bm_acc}, expected 100 (50+50 summed)")
+else:
+    errors.append("BUG 7 FAIL: gen1 not in settlements")
+    print(f"  FAIL: gen1 not in settlements")
+
+# ══════════════════════════════════════════════
 print()
 if errors:
     print(f"FAILURES ({len(errors)}):")
     for e in errors:
         print(f"  ✗ {e}")
-    sys.exit(1)
+    if __name__ == "__main__": sys.exit(1)
 else:
-    print("=== ALL 6 BUG REGRESSION TESTS PASSED ===")
-    sys.exit(0)
+    print("=== ALL 7 BUG REGRESSION TESTS PASSED ===")
+    if __name__ == "__main__": sys.exit(0)

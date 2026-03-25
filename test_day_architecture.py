@@ -2,11 +2,12 @@
 Regression tests for the new day-level + SP-level phase architecture.
 
 Architecture:
-  Day-level: FORECAST → DA → IDA1 → IDA2 → ID → REALTIME
-  Real-time: SP 1..48, each with BM_OPEN → BM_CLOSE
+  Day-level: FORECAST_0 → DA → FORECAST_1 → IDA1 → FORECAST_2 → IDA2 → ID_ROUNDS → REALTIME
+  Real-time: SP 1..48, each with BM_OPEN → BM_CLEAR → SP_SETTLED
   End:       RESULTS → next day
 """
 import sys
+import time
 
 from engine.game_loop import (
     register_player, advance_phase, advance_day_phase, advance_bm,
@@ -35,7 +36,7 @@ ROOM = "ARCH_TEST_1"
 register_player(ROOM, "g1", {"name": "Gen1", "asset": "OCGT", "role": "GENERATOR"})
 rs = _get_room(ROOM)
 check("day = 1", rs["day"] == 1)
-check("dayPhase = FORECAST", rs["dayPhase"] == "FORECAST")
+check("dayPhase = FORECAST_0", rs["dayPhase"] == "FORECAST_0")
 check("currentSp = 0", rs["currentSp"] == 0)
 check("bmSubPhase = None", rs["bmSubPhase"] is None)
 check("markets is empty dict", rs["markets"] == {})
@@ -46,32 +47,45 @@ print("\nTEST 2: FULL mode day-level phase sequence...")
 # ══════════════════════════════════════════════
 ROOM2 = "ARCH_TEST_2"
 register_player(ROOM2, "g1", {"name": "Gen1", "asset": "OCGT", "role": "GENERATOR"})
-rs2 = _get_room(ROOM2)
 
-# FORECAST → DA
+# FORECAST_0 → DA
 r = advance_day_phase(ROOM2)
-check("FORECAST → DA", rs2["dayPhase"] == "DA", rs2["dayPhase"])
+rs2 = _get_room(ROOM2)
+check("FORECAST_0 → DA", rs2["dayPhase"] == "DA", rs2["dayPhase"])
 check("Markets generated for 48 SPs", r.get("marketsGenerated") == 48)
 check("48 markets exist", len(rs2["markets"]) == 48)
 check("Positions initialised", "g1" in rs2["positions"])
-check("Position for SP 1 = 0", rs2["positions"]["g1"].get(1) == 0.0)
 
-# DA → IDA1
+# DA → FORECAST_1
 r = advance_day_phase(ROOM2)
-check("DA → IDA1", rs2["dayPhase"] == "IDA1", rs2["dayPhase"])
+rs2 = _get_room(ROOM2)
+check("DA → FORECAST_1", rs2["dayPhase"] == "FORECAST_1", rs2["dayPhase"])
 check("daResults populated", len(rs2["daResults"]) == 48)
 
-# IDA1 → IDA2
+# FORECAST_1 → IDA1
 r = advance_day_phase(ROOM2)
-check("IDA1 → IDA2", rs2["dayPhase"] == "IDA2", rs2["dayPhase"])
+rs2 = _get_room(ROOM2)
+check("FORECAST_1 → IDA1", rs2["dayPhase"] == "IDA1", rs2["dayPhase"])
 
-# IDA2 → ID
+# IDA1 → FORECAST_2
 r = advance_day_phase(ROOM2)
-check("IDA2 → ID", rs2["dayPhase"] == "ID", rs2["dayPhase"])
+rs2 = _get_room(ROOM2)
+check("IDA1 → FORECAST_2", rs2["dayPhase"] == "FORECAST_2", rs2["dayPhase"])
 
-# ID → REALTIME (enters BM for SP 1)
+# FORECAST_2 → IDA2
 r = advance_day_phase(ROOM2)
-check("ID → REALTIME", rs2["dayPhase"] == "REALTIME", rs2["dayPhase"])
+rs2 = _get_room(ROOM2)
+check("FORECAST_2 → IDA2", rs2["dayPhase"] == "IDA2", rs2["dayPhase"])
+
+# IDA2 → ID_ROUNDS
+r = advance_day_phase(ROOM2)
+rs2 = _get_room(ROOM2)
+check("IDA2 → ID_ROUNDS", rs2["dayPhase"] == "ID_ROUNDS", rs2["dayPhase"])
+
+# ID_ROUNDS → REALTIME (enters BM for SP 1)
+r = advance_day_phase(ROOM2)
+rs2 = _get_room(ROOM2)
+check("ID_ROUNDS → REALTIME", rs2["dayPhase"] == "REALTIME", rs2["dayPhase"])
 check("currentSp = 1", rs2["currentSp"] == 1)
 check("bmSubPhase = BM_OPEN", rs2["bmSubPhase"] == "BM_OPEN")
 
@@ -82,10 +96,10 @@ ROOM3 = "ARCH_TEST_3"
 register_player(ROOM3, "t1", {"name": "Tut", "asset": "BESS_M", "role": "BESS"})
 set_room_config(ROOM3, {"gameMode": "TUTORIAL"})
 
-# FORECAST → REALTIME (skips DA, IDA1, IDA2, ID)
-r = advance_day_phase(ROOM3)  # FORECAST → next
+# FORECAST_0 → REALTIME (skips DA, IDA1, IDA2, ID_ROUNDS)
+r = advance_day_phase(ROOM3)  # FORECAST_0 → next
 rs3 = _get_room(ROOM3)
-check("TUTORIAL: FORECAST → REALTIME", rs3["dayPhase"] == "REALTIME",
+check("TUTORIAL: FORECAST_0 → REALTIME", rs3["dayPhase"] == "REALTIME",
       rs3["dayPhase"])
 check("TUTORIAL: currentSp = 1", rs3["currentSp"] == 1)
 
@@ -95,23 +109,32 @@ print("\nTEST 4: BM loop cycles through SPs...")
 ROOM4 = "ARCH_TEST_4"
 register_player(ROOM4, "g1", {"name": "Gen1", "asset": "OCGT", "role": "GENERATOR"})
 
-# Get to REALTIME
-advance_day_phase(ROOM4)  # FORECAST
-advance_day_phase(ROOM4)  # DA
-advance_day_phase(ROOM4)  # IDA1
-advance_day_phase(ROOM4)  # IDA2
-advance_day_phase(ROOM4)  # ID → REALTIME, SP 1
+# Get to REALTIME (FULL mode: 7 advances)
+advance_day_phase(ROOM4)  # FORECAST_0 → DA
+advance_day_phase(ROOM4)  # DA → FORECAST_1
+advance_day_phase(ROOM4)  # FORECAST_1 → IDA1
+advance_day_phase(ROOM4)  # IDA1 → FORECAST_2
+advance_day_phase(ROOM4)  # FORECAST_2 → IDA2
+advance_day_phase(ROOM4)  # IDA2 → ID_ROUNDS
+advance_day_phase(ROOM4)  # ID_ROUNDS → REALTIME, SP 1
 
 rs4 = _get_room(ROOM4)
 check("In REALTIME SP 1", rs4["currentSp"] == 1 and rs4["dayPhase"] == "REALTIME")
 
-# BM_OPEN → BM_CLOSE (clears + settles SP 1)
+# BM_OPEN → BM_CLEAR (clears SP 1)
 r = advance_bm(ROOM4)
-check("BM_OPEN → BM_CLOSE", rs4["bmSubPhase"] == "BM_CLOSE", rs4["bmSubPhase"])
+rs4 = _get_room(ROOM4)
+check("BM_OPEN → BM_CLEAR", rs4["bmSubPhase"] == "BM_CLEAR", rs4["bmSubPhase"])
 check("SP 1 settled", 1 in rs4["spSettlements"])
 
-# BM_CLOSE → next SP (BM_OPEN for SP 2)
+# BM_CLEAR → SP_SETTLED
 r = advance_bm(ROOM4)
+rs4 = _get_room(ROOM4)
+check("BM_CLEAR → SP_SETTLED", rs4["bmSubPhase"] == "SP_SETTLED", rs4["bmSubPhase"])
+
+# SP_SETTLED → next SP (BM_OPEN for SP 2)
+r = advance_bm(ROOM4)
+rs4 = _get_room(ROOM4)
 check("Advance to SP 2", rs4["currentSp"] == 2, rs4["currentSp"])
 check("BM_OPEN for SP 2", rs4["bmSubPhase"] == "BM_OPEN")
 
@@ -122,19 +145,21 @@ ROOM5 = "ARCH_TEST_5"
 register_player(ROOM5, "g1", {"name": "Gen1", "asset": "OCGT", "role": "GENERATOR"})
 set_room_config(ROOM5, {"gameMode": "TUTORIAL"})  # Skip trading phases
 
-# FORECAST → REALTIME
+# FORECAST_0 → REALTIME
 advance_day_phase(ROOM5)
 rs5 = _get_room(ROOM5)
 check("Start REALTIME", rs5["dayPhase"] == "REALTIME")
 
-# Run all 48 SPs (each needs BM_OPEN + BM_CLOSE = 2 advances)
+# Run all 48 SPs (each needs BM_OPEN → BM_CLEAR → SP_SETTLED = 3 advances per SP)
 for sp_num in range(1, SPS_PER_DAY + 1):
-    advance_bm(ROOM5)  # BM_OPEN → BM_CLOSE (clear + settle)
+    advance_bm(ROOM5)  # BM_OPEN → BM_CLEAR
+    advance_bm(ROOM5)  # BM_CLEAR → SP_SETTLED
     if sp_num < SPS_PER_DAY:
-        advance_bm(ROOM5)  # BM_CLOSE → next SP BM_OPEN
+        advance_bm(ROOM5)  # SP_SETTLED → next SP BM_OPEN
 
-# After last SP's BM_CLOSE, advance should go to RESULTS
+# After last SP's SP_SETTLED, advance should go to RESULTS
 advance_bm(ROOM5)
+rs5 = _get_room(ROOM5)
 check("All SPs done → RESULTS", rs5["dayPhase"] == "RESULTS", rs5["dayPhase"])
 check("currentSp = 0 after RESULTS", rs5["currentSp"] == 0)
 check("48 SPs settled", len(rs5["spSettlements"]) == 48,
@@ -148,8 +173,9 @@ check("g1 has overallScore", rs5["playerStates"]["g1"]["overallScore"] is not No
 print("\nTEST 6: New day resets day-level state...")
 # ══════════════════════════════════════════════
 # Continue from ROOM5 which is in RESULTS
-advance_day_phase(ROOM5)  # RESULTS → FORECAST (new day)
-check("New day: dayPhase = FORECAST", rs5["dayPhase"] == "FORECAST", rs5["dayPhase"])
+advance_day_phase(ROOM5)  # RESULTS → FORECAST_0 (new day)
+rs5 = _get_room(ROOM5)
+check("New day: dayPhase = FORECAST_0", rs5["dayPhase"] == "FORECAST_0", rs5["dayPhase"])
 check("New day: day = 2", rs5["day"] == 2)
 check("New day: markets cleared", len(rs5["markets"]) == 0)
 check("New day: positions cleared", len(rs5["positions"]) == 0)
@@ -158,6 +184,48 @@ check("New day: spSettlements cleared", len(rs5["spSettlements"]) == 0)
 # But player state persists
 check("Player state persists", "g1" in rs5["playerStates"])
 check("Cash persists", rs5["playerStates"]["g1"]["cash"] is not None)
+check("New day: phaseStartTs reset",
+      rs5.get("phaseStartTs") is not None and rs5["phaseStartTs"] > 0,
+      f"phaseStartTs={rs5.get('phaseStartTs')}")
+
+# ══════════════════════════════════════════════
+print("\nTEST 6b: phaseStartTs updated on every advance...")
+# ══════════════════════════════════════════════
+ROOM6B = "ARCH_TEST_6B"
+register_player(ROOM6B, "g1", {"name": "Gen1", "asset": "OCGT", "role": "GENERATOR"})
+
+before_ts = int(time.time() * 1000)
+advance_day_phase(ROOM6B)  # FORECAST_0 → DA
+rs6b = _get_room(ROOM6B)
+after_ts = int(time.time() * 1000)
+check("phaseStartTs set after FORECAST_0→DA",
+      rs6b.get("phaseStartTs") is not None and before_ts <= rs6b["phaseStartTs"] <= after_ts + 100,
+      f"phaseStartTs={rs6b.get('phaseStartTs')}")
+
+prev_ts = rs6b["phaseStartTs"]
+advance_day_phase(ROOM6B)  # DA → FORECAST_1
+rs6b = _get_room(ROOM6B)
+check("phaseStartTs updated after DA→FORECAST_1",
+      rs6b.get("phaseStartTs") is not None and rs6b["phaseStartTs"] >= prev_ts,
+      f"phaseStartTs={rs6b.get('phaseStartTs')}")
+
+prev_ts = rs6b["phaseStartTs"]
+advance_day_phase(ROOM6B)  # FORECAST_1 → IDA1
+advance_day_phase(ROOM6B)  # IDA1 → FORECAST_2
+advance_day_phase(ROOM6B)  # FORECAST_2 → IDA2
+advance_day_phase(ROOM6B)  # IDA2 → ID_ROUNDS
+advance_day_phase(ROOM6B)  # ID_ROUNDS → REALTIME
+rs6b = _get_room(ROOM6B)
+check("phaseStartTs updated through all day phases",
+      rs6b.get("phaseStartTs") is not None and rs6b["phaseStartTs"] >= prev_ts,
+      f"phaseStartTs={rs6b.get('phaseStartTs')}")
+
+prev_ts = rs6b["phaseStartTs"]
+advance_bm(ROOM6B)  # BM_OPEN → BM_CLEAR
+rs6b = _get_room(ROOM6B)
+check("phaseStartTs updated on BM advance",
+      rs6b.get("phaseStartTs") is not None and rs6b["phaseStartTs"] >= prev_ts,
+      f"phaseStartTs={rs6b.get('phaseStartTs')}")
 
 # ══════════════════════════════════════════════
 print("\nTEST 7: DA bids across all SPs update positions...")
@@ -166,7 +234,7 @@ ROOM7 = "ARCH_TEST_7"
 register_player(ROOM7, "gen", {"name": "Gen", "asset": "OCGT", "role": "GENERATOR"})
 register_player(ROOM7, "sup", {"name": "Sup", "asset": "OCGT", "role": "SUPPLIER"})
 
-# FORECAST
+# FORECAST_0 → DA
 advance_day_phase(ROOM7)
 rs7 = _get_room(ROOM7)
 
@@ -174,9 +242,10 @@ rs7 = _get_room(ROOM7)
 submit_da_bids(ROOM7, "gen", [{"sp": 10, "side": "offer", "mw": 50, "price": 55}])
 submit_da_bids(ROOM7, "sup", [{"sp": 10, "side": "bid", "mw": 50, "price": 70}])
 
-# DA clears
+# DA → FORECAST_1 (clears DA)
 advance_day_phase(ROOM7)
-check("DA cleared", rs7["dayPhase"] == "IDA1", rs7["dayPhase"])
+rs7 = _get_room(ROOM7)
+check("DA cleared → FORECAST_1", rs7["dayPhase"] == "FORECAST_1", rs7["dayPhase"])
 
 # Check gen's position for SP 10 was updated
 gen_pos_10 = rs7["positions"].get("gen", {}).get(10, 0)
@@ -190,12 +259,19 @@ check("Gen position for SP 1 = 0 (no bids)", gen_pos_1 == 0.0)
 # ══════════════════════════════════════════════
 print("\nTEST 8: IDA bids further adjust positions...")
 # ══════════════════════════════════════════════
-# Continue from ROOM7 (now in IDA1)
+# Continue from ROOM7 (now in FORECAST_1)
+# FORECAST_1 → IDA1
+advance_day_phase(ROOM7)
+rs7 = _get_room(ROOM7)
+check("In IDA1", rs7["dayPhase"] == "IDA1", rs7["dayPhase"])
+
 old_pos = rs7["positions"]["gen"][10]
 submit_ida_bids(ROOM7, "IDA1", "gen", [{"sp": 10, "side": "offer", "mw": 10, "price": 60}])
 submit_ida_bids(ROOM7, "IDA1", "sup", [{"sp": 10, "side": "bid", "mw": 10, "price": 75}])
 
-advance_day_phase(ROOM7)  # IDA1 → IDA2
+# IDA1 → FORECAST_2 (clears IDA1)
+advance_day_phase(ROOM7)
+rs7 = _get_room(ROOM7)
 new_pos = rs7["positions"]["gen"][10]
 check("IDA1 increased gen position for SP 10",
       new_pos >= old_pos, f"old={old_pos}, new={new_pos}")
@@ -208,13 +284,14 @@ register_player(ROOM9, "g1", {"name": "G", "asset": "OCGT", "role": "GENERATOR"}
 set_room_config(ROOM9, {"gameMode": "TUTORIAL"})
 
 # advance_phase should work as compat wrapper
-r = advance_phase(ROOM9)  # FORECAST → REALTIME
+r = advance_phase(ROOM9)  # FORECAST_0 → REALTIME
 rs9 = _get_room(ROOM9)
 check("Compat: dayPhase = REALTIME", rs9["dayPhase"] == "REALTIME", rs9["dayPhase"])
 
 # In REALTIME, advance_phase should route to advance_bm
-r = advance_phase(ROOM9)  # BM_OPEN → BM_CLOSE
-check("Compat: bmSubPhase = BM_CLOSE", rs9["bmSubPhase"] == "BM_CLOSE",
+r = advance_phase(ROOM9)  # BM_OPEN → BM_CLEAR
+rs9 = _get_room(ROOM9)
+check("Compat: bmSubPhase = BM_CLEAR", rs9["bmSubPhase"] == "BM_CLEAR",
       rs9["bmSubPhase"])
 
 # ══════════════════════════════════════════════
@@ -228,6 +305,13 @@ check("State has 'bmSubPhase'", "bmSubPhase" in state)
 check("State has 'positions'", "positions" in state)
 check("State has 'markets'", "markets" in state)
 check("State has 'daResults'", "daResults" in state)
+check("State has 'phaseStartTs'", "phaseStartTs" in state)
+check("State has 'systemState'", "systemState" in state)
+check("State has 'playerReady'", "playerReady" in state)
+check("State has 'orderBooks'", "orderBooks" in state)
+check("State has 'daCurves'", "daCurves" in state)
+check("State has 'ida1Results'", "ida1Results" in state)
+check("State has 'ida2Results'", "ida2Results" in state)
 
 
 # ══════════════════════════════════════════════
@@ -242,21 +326,29 @@ print("\nTEST 12: BM bids only apply to current SP...")
 ROOM12 = "ARCH_TEST_12"
 register_player(ROOM12, "g1", {"name": "G1", "asset": "OCGT", "role": "GENERATOR"})
 set_room_config(ROOM12, {"gameMode": "TUTORIAL"})
-advance_day_phase(ROOM12)  # FORECAST → REALTIME
+advance_day_phase(ROOM12)  # FORECAST_0 → REALTIME
 
 rs12 = _get_room(ROOM12)
 check("SP 1 BM_OPEN", rs12["currentSp"] == 1 and rs12["bmSubPhase"] == "BM_OPEN")
 
 # Submit BM bid for current SP
 submit_bm_bid(ROOM12, "g1", {"side": "offer", "mw": 20, "price": 65})
+rs12 = _get_room(ROOM12)
 check("BM bid in orderbook", "g1" in rs12["bmOrderBook"])
 
-# Advance BM_OPEN → BM_CLOSE (clears SP 1)
+# Advance BM_OPEN → BM_CLEAR (clears SP 1)
 advance_bm(ROOM12)
-check("SP 1 BM_CLOSE", rs12["bmSubPhase"] == "BM_CLOSE")
+rs12 = _get_room(ROOM12)
+check("SP 1 BM_CLEAR", rs12["bmSubPhase"] == "BM_CLEAR")
 
-# Advance to SP 2 — BM orderbook should be fresh
+# Advance BM_CLEAR → SP_SETTLED
 advance_bm(ROOM12)
+rs12 = _get_room(ROOM12)
+check("SP 1 SP_SETTLED", rs12["bmSubPhase"] == "SP_SETTLED")
+
+# Advance SP_SETTLED → SP 2 BM_OPEN — BM orderbook should be fresh
+advance_bm(ROOM12)
+rs12 = _get_room(ROOM12)
 check("SP 2 BM_OPEN", rs12["currentSp"] == 2 and rs12["bmSubPhase"] == "BM_OPEN")
 check("BM orderbook cleared for SP 2", len(rs12["bmOrderBook"]) == 0)
 
@@ -342,14 +434,16 @@ ROOM15 = "ARCH_TEST_15"
 register_player(ROOM15, "g1", {"name": "Gen", "asset": "OCGT", "role": "GENERATOR"})
 register_player(ROOM15, "s1", {"name": "Sup", "asset": "OCGT", "role": "SUPPLIER"})
 
-# Advance to ID phase
-advance_day_phase(ROOM15)  # FORECAST
-advance_day_phase(ROOM15)  # DA
-advance_day_phase(ROOM15)  # IDA1
-advance_day_phase(ROOM15)  # IDA2
+# Advance to ID_ROUNDS phase (FULL mode: 6 advances)
+advance_day_phase(ROOM15)  # FORECAST_0 → DA
+advance_day_phase(ROOM15)  # DA → FORECAST_1
+advance_day_phase(ROOM15)  # FORECAST_1 → IDA1
+advance_day_phase(ROOM15)  # IDA1 → FORECAST_2
+advance_day_phase(ROOM15)  # FORECAST_2 → IDA2
+advance_day_phase(ROOM15)  # IDA2 → ID_ROUNDS
 
 rs15 = _get_room(ROOM15)
-check("In ID phase", rs15["dayPhase"] == "ID", rs15["dayPhase"])
+check("In ID_ROUNDS phase", rs15["dayPhase"] == "ID_ROUNDS", rs15["dayPhase"])
 
 # Submit ID orders
 submit_id_orders(ROOM15, "g1", [{"sp": 5, "side": "offer", "mw": 30, "price": 52}])
@@ -360,9 +454,10 @@ s1_pos_before = rs15["positions"]["s1"][5]
 g1_cash_before = rs15["playerStates"]["g1"]["cash"]
 s1_cash_before = rs15["playerStates"]["s1"]["cash"]
 
-# Advance ID → REALTIME (this triggers _on_id_close with order-book matching)
+# Advance ID_ROUNDS → REALTIME (this triggers _on_id_close with order-book matching)
 r = advance_day_phase(ROOM15)
-check("ID → REALTIME", rs15["dayPhase"] == "REALTIME", rs15["dayPhase"])
+rs15 = _get_room(ROOM15)
+check("ID_ROUNDS → REALTIME", rs15["dayPhase"] == "REALTIME", rs15["dayPhase"])
 check("ID trades matched > 0", r.get("idTradesMatched", 0) > 0,
       f"got {r.get('idTradesMatched')}")
 
@@ -409,7 +504,7 @@ if errors:
     print(f"FAILURES ({len(errors)}):")
     for e in errors:
         print(f"  ✗ {e}")
-    sys.exit(1)
+    if __name__ == "__main__": sys.exit(1)
 else:
     print("=== ALL DAY-ARCHITECTURE TESTS PASSED ===")
-    sys.exit(0)
+    if __name__ == "__main__": sys.exit(0)

@@ -49,4 +49,5 @@ st = get_room_state("TEST")
 print(f"   sp={st.get('currentSp', st.get('sp'))}, phase={st.get('dayPhase', st.get('phase'))}, players={len(st['playerStates'])}")
 
 print("\n=== ALL SMOKE TESTS PASSED ===")
-sys.exit(0)
+if __name__ == "__main__":
+    sys.exit(0)

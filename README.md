@@ -24,10 +24,11 @@ Overview
 GridForge simulates three interlocking GB electricity markets within each 30-minute Settlement Period (SP):
 
 Day-Ahead (DA) — forward auction where generators and suppliers submit volume offers/bids 6 SPs ahead, locking in contracted positions at a pay-as-clear clearing price.
+Intraday Auctions (IDA1/IDA2) — sealed-bid uniform-price auctions with progressively more accurate forecasts.
 Intraday (ID) — continuous bilateral trading to adjust positions as new weather information arrives.
 Balancing Mechanism (BM) — real-time merit-order dispatch where the System Operator calls on flexibility to resolve Net Imbalance Volume (NIV). Uniform pricing: all accepted offers earn the marginal clearing price.
 
-State is synchronised in real time across all browser clients via GunDB (a P2P graph database). No backend server is required.
+State is server-authoritative: a FastAPI backend with PostgreSQL holds all game state, and clients synchronise in real time via WebSocket with a versioned delta protocol.
 
 Quick Start
 bashgit clone <repo>
@@ -47,7 +48,7 @@ Wait in the lobby until the host starts the game.
 
 Architecture
 src/
-├── App.jsx                    # Root component: state, GunDB subscriptions, game loop
+├── App.jsx                    # Root component: state, WebSocket subscriptions, game loop
 ├── main.jsx                   # React entry point
 │
 ├── components/
@@ -84,12 +85,12 @@ src/
 │
 ├── hooks/
 │   ├── useGameEngine.js       # Phase transition handler (DA/ID/BM/SETTLED)
-│   └── useGun.js              # GunDB init, toast notifications
+│   └── useApi.js              # REST API + WebSocket wrapper
 │
 └── shared/
     ├── constants.js           # ASSETS, SCENARIOS, EVENTS, SCORING_CONFIG, …
     └── utils.js               # clamp, f0, f1, fpp, spTime, uid, roomKey
-State sync model: All shared game state (phase, SP number, order books, forecasts, settlement contracts) flows through GunDB. Each client subscribes to the relevant keys on entry and reacts to changes. The host/instructor is the sole source of phase advancement via meta.phase writes. All clients derive their own financial calculations locally from the same market state.
+State sync model: All shared game state (phase, SP number, order books, forecasts, settlement contracts) flows through the FastAPI backend and is broadcast to clients via WebSocket with a versioned delta protocol. The server is the sole source of truth for phase advancement, market clearing, and settlement. Clients submit bids/actions via REST and receive state updates via WebSocket.
 
 Roles
 🏭 Generator
@@ -234,7 +235,7 @@ Discussion Prompts: Five pre-written Socratic questions displayed in-panel for f
 
 Forecasting
 NESO Forecast Canvas (ForecastPanel.jsx)
-The NESO player draws demand, wind, and solar curves on an SVG canvas. Published versions are serialised to JSON and written to the forecast GunDB key. All other players read and display this forecast.
+The NESO player draws demand, wind, and solar curves on an SVG canvas. Published versions are serialised to JSON and broadcast via WebSocket. All other players read and display this forecast.
 A history of up to 50 published versions is maintained by ForecastEngine. Versions are labelled by author and timestamp.
 ForecastEngine (ForecastEngine.js)
 Supports three operating modes:
@@ -259,7 +260,7 @@ NESOScreen.jsx — Split layout: left = ForecastPanel canvas; centre = manual di
 SupplierScreen.jsx — Procurement cost dashboard, hedge ratio display, DA bid submission, imbalance exposure calculator.
 TraderScreen.jsx — Open position tracker, DA/ID bid panels, P&L attribution breakdown across markets.
 Shared Components
-WaitingRoom.jsx — Lobby with player list, role/asset selection, host election via GunDB timestamp comparison (see BUG-004 re: reconnect edge case).
+WaitingRoom.jsx — Lobby with player list, role/asset selection, server-authoritative NESO election (see BUG-004 re: reconnect edge case).
 SharedLayout.jsx — Persistent phase header bar (phase name, SP number, timer countdown, market signal indicator). Used by all role screens.
 ForecastPanel.jsx — Interactive SVG canvas for drawing and publishing demand/wind/solar forecasts. Supports zoom, undo, and version history.
 Chart Components

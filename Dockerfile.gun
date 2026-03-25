@@ -1,7 +1,0 @@
-# Dockerfile for GunDB relay server
-FROM node:20-alpine
-WORKDIR /app
-COPY gun-relay.cjs ./
-RUN npm install gun express
-EXPOSE 8765
-CMD ["node", "gun-relay.cjs"]

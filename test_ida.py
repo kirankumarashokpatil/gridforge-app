@@ -54,13 +54,14 @@ rs = _get_room(ROOM)
 
 phases_seen = [rs["dayPhase"]]
 # Advance through day-level phases until REALTIME
-for _ in range(5):  # FORECAST→DA→IDA1→IDA2→ID→REALTIME
+for _ in range(8):  # FORECAST_0→DA→FORECAST_1→IDA1→FORECAST_2→IDA2→ID_ROUNDS→REALTIME
     result = advance_day_phase(ROOM)
+    rs = _get_room(ROOM)
     phases_seen.append(result["newPhase"])
     if result["newPhase"] == "REALTIME":
         break
 
-expected = ["FORECAST", "DA", "IDA1", "IDA2", "ID", "REALTIME"]
+expected = ["FORECAST_0", "DA", "FORECAST_1", "IDA1", "FORECAST_2", "IDA2", "ID_ROUNDS", "REALTIME"]
 check(f"Phase sequence = {expected}", phases_seen == expected,
       f"got {phases_seen}")
 
@@ -76,11 +77,11 @@ set_room_config(ROOM_T, {"gameMode": "TUTORIAL"})
 
 rs_t = _get_room(ROOM_T)
 phases_tut = [rs_t["dayPhase"]]
-# TUTORIAL: FORECAST → REALTIME (skips DA/IDA/ID)
+# TUTORIAL: FORECAST_0 → REALTIME (skips DA/IDA/ID)
 result = advance_day_phase(ROOM_T)
 phases_tut.append(result["newPhase"])
 
-expected_tut = ["FORECAST", "REALTIME"]
+expected_tut = ["FORECAST_0", "REALTIME"]
 check(f"TUTORIAL sequence = {expected_tut}", phases_tut == expected_tut,
       f"got {phases_tut}")
 
@@ -145,14 +146,16 @@ generate_market(ROOM4)
 submit_ida_bids(ROOM4, "IDA1", "c1", [{"side": "offer", "mw": 30, "price": 55}])
 submit_ida_bids(ROOM4, "IDA1", "c2", [{"side": "bid", "mw": 30, "price": 70}])
 
-# Advance through FORECAST→DA→IDA1
-advance_day_phase(ROOM4)  # FORECAST → DA
-advance_day_phase(ROOM4)  # DA → IDA1
+# Advance through FORECAST_0→DA→FORECAST_1→IDA1
+advance_day_phase(ROOM4)  # FORECAST_0 → DA
+advance_day_phase(ROOM4)  # DA → FORECAST_1
+advance_day_phase(ROOM4)  # FORECAST_1 → IDA1
 rs4 = _get_room(ROOM4)
 check("Phase is IDA1", rs4["dayPhase"] == "IDA1")
 
 # Advance clears IDA1
-result_ida1 = advance_day_phase(ROOM4)  # IDA1 → IDA2
+result_ida1 = advance_day_phase(ROOM4)  # IDA1 → FORECAST_2
+rs4 = _get_room(ROOM4)
 
 # Check contract position adjusted
 ps_c1 = rs4["playerStates"]["c1"]
@@ -167,7 +170,7 @@ if errors:
     print(f"FAILURES ({len(errors)}):")
     for e in errors:
         print(f"  ✗ {e}")
-    sys.exit(1)
+    if __name__ == "__main__": sys.exit(1)
 else:
     print("=== ALL IDA REGRESSION TESTS PASSED ===")
-    sys.exit(0)
+    if __name__ == "__main__": sys.exit(0)

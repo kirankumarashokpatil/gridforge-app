@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   db:
@@ -19,11 +17,23 @@ services:
       timeout: 5s
       retries: 5
 
-  # GridForge FastAPI Server
+  # Redis (message bus between gateway ↔ room workers)
+  redis:
+    image: redis:7-alpine
+    container_name: gridforge-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # GridForge FastAPI Backend
   api:
     build:
-      context: .
-      dockerfile: Dockerfile.fastapi
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: gridforge-api
     environment:
       DB_HOST: db
@@ -31,6 +41,7 @@ services:
       DB_USER: gridforge
       DB_PASSWORD: gridforge123
       DB_NAME: gridforge
+      REDIS_URL: redis://redis:6379/0
       PORT: 8000
       ENV: production
     ports:
@@ -38,18 +49,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
-  # GridForge Frontend (Vite + nginx)
+  # GridForge Frontend (Vite → nginx + reverse proxy)
   app:
     build:
-      context: .
+      context: ./frontend
       dockerfile: Dockerfile
       target: runner
     container_name: gridforge-app
     environment:
-      # VITE_API_URL is used at build time, not runtime for static files
-      # Frontend will use relative URLs to reach API via nginx proxy or direct
       NODE_ENV: production
     ports:
       - "3000:80"
