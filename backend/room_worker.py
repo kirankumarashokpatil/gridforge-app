@@ -46,6 +46,17 @@ class RoomWorker:
             self._advance_locks[room_id] = lock
         return lock
 
+    def cleanup_room(self, room_id: str) -> None:
+        """Free the advance lock and evict in-memory game state for a deleted room.
+
+        Call this after deleting a room from the DB so long-lived servers
+        don't accumulate locks and state for rooms that no longer exist.
+        """
+        self._advance_locks.pop(room_id, None)
+        # Also evict in-memory game state if still present
+        from engine import game_loop as _gl  # local import to avoid circular dep
+        _gl._room_states.pop(room_id, None)
+
     @staticmethod
     def _validate_precondition(rs: dict, data: Optional[dict]) -> Optional[str]:
         """Reject stale client advances so retries cannot skip phases/SPs."""
@@ -259,7 +270,7 @@ class RoomWorker:
             # Flush event log (fire-and-forget)
             pending = list(rs.get("_pendingEvents", []))
             rs["_pendingEvents"] = []
-            asyncio.ensure_future(flush_events(room_id, pending))
+            asyncio.create_task(flush_events(room_id, pending))
 
             db_sp = max(1, rs["currentSp"])
             await db.execute(
@@ -334,7 +345,7 @@ class RoomWorker:
             # Flush event log
             pending = list(rs.get("_pendingEvents", []))
             rs["_pendingEvents"] = []
-            asyncio.ensure_future(flush_events(room_id, pending))
+            asyncio.create_task(flush_events(room_id, pending))
 
             await db.execute(
                 "UPDATE rooms SET phase = $1, sp = $2, phase_start_ts = $3, last_active = CURRENT_TIMESTAMP WHERE room_id = $4",
@@ -474,7 +485,7 @@ class RoomWorker:
             # Flush event log
             pending = list(rs.get("_pendingEvents", []))
             rs["_pendingEvents"] = []
-            asyncio.ensure_future(flush_events(room_id, pending))
+            asyncio.create_task(flush_events(room_id, pending))
 
             db_sp = max(1, rs["currentSp"])
             await db.execute(
@@ -712,29 +723,30 @@ class RoomWorker:
     # ── IDA bid ─────────────────────────────────────────────────────────
 
     async def _cmd_ida_bid(self, room_id: str, data: dict) -> CommandResult:
-        player_id = data.get("playerId")
-        bids = data.get("bids", [])
-        if not bids and data.get("bid"):
-            bids = [data["bid"]]
-        ida_round = data.get("idaRound", "").upper()
-        if ida_round not in ("IDA1", "IDA2"):
-            return CommandResult(error=f"Unknown IDA round: {ida_round}", status_code=400)
-        # Gate closure: reject bids outside the IDA phase
-        rs = game_loop._get_room(room_id)
-        if rs.get("dayPhase") != ida_round:
+        async with self._get_advance_lock(room_id):
+            player_id = data.get("playerId")
+            bids = data.get("bids", [])
+            if not bids and data.get("bid"):
+                bids = [data["bid"]]
+            ida_round = data.get("idaRound", "").upper()
+            if ida_round not in ("IDA1", "IDA2"):
+                return CommandResult(error=f"Unknown IDA round: {ida_round}", status_code=400)
+            # Gate closure: reject bids outside the IDA phase
+            rs = game_loop._get_room(room_id)
+            if rs.get("dayPhase") != ida_round:
+                return CommandResult(
+                    error=f"Gate closed for {ida_round} bids in phase {rs.get('dayPhase')}",
+                    status_code=403,
+                )
+            result = game_loop.submit_ida_bids(room_id, ida_round, player_id, bids)
             return CommandResult(
-                error=f"Gate closed for {ida_round} bids in phase {rs.get('dayPhase')}",
-                status_code=403,
+                result=result,
+                broadcasts=[{
+                    "type": f"{ida_round.lower()}_bid",
+                    "playerId": player_id,
+                    "data": result,
+                }],
             )
-        result = game_loop.submit_ida_bids(room_id, ida_round, player_id, bids)
-        return CommandResult(
-            result=result,
-            broadcasts=[{
-                "type": f"{ida_round.lower()}_bid",
-                "playerId": player_id,
-                "data": result,
-            }],
-        )
 
     # ── IDA clear ───────────────────────────────────────────────────────
 

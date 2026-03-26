@@ -16,16 +16,25 @@ router = APIRouter(prefix="/api/rooms", tags=["events"])
 @router.post("/{room_id}/events")
 async def trigger_event(room_id: str, event: Dict[str, Any]):
     """Trigger instructor event"""
+    event_id = event.get("eventId")
+    if not event_id:
+        raise HTTPException(status_code=422, detail="eventId required")
+    ts = event.get("ts", int(datetime.now().timestamp() * 1000))
+    if not isinstance(ts, (int, float)):
+        raise HTTPException(status_code=422, detail="ts must be a number")
+
     try:
         await db.execute(
             "INSERT INTO events (room_id, event_type, ts) VALUES ($1, $2, $3)",
             room_id,
-            event.get("eventId"),
-            event.get("ts", int(datetime.now().timestamp() * 1000))
+            event_id,
+            int(ts),
         )
 
         await manager.broadcast_to_room(room_id, {"type": "event", "data": event})
         return {"success": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -41,6 +50,25 @@ async def get_room_events(room_id: str, since: int = 0, limit: int = 500):
     """
     try:
         import json
+
+        if since < 0:
+            raise HTTPException(status_code=422, detail="since must be >= 0")
+        if limit <= 0:
+            raise HTTPException(status_code=422, detail="limit must be > 0")
+
+        def _safe_event_data(raw: Any) -> Dict[str, Any]:
+            if isinstance(raw, dict):
+                return raw
+            if raw is None:
+                return {}
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                    return parsed if isinstance(parsed, dict) else {"raw": parsed}
+                except Exception:
+                    return {"raw": raw, "_parseError": True}
+            return {"raw": raw}
+
         limit = min(limit, 2000)
         rows = await db.query(
             "SELECT sequence, occurred_at, event_type, data "
@@ -53,10 +81,12 @@ async def get_room_events(room_id: str, since: int = 0, limit: int = 500):
                 "sequence": r["sequence"],
                 "occurredAt": r["occurred_at"].isoformat() if r["occurred_at"] else None,
                 "eventType": r["event_type"],
-                "data": r["data"] if isinstance(r["data"], dict) else json.loads(r["data"]),
+                "data": _safe_event_data(r["data"]),
             }
             for r in rows
         ]
         return {"roomId": room_id, "events": events, "count": len(events)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

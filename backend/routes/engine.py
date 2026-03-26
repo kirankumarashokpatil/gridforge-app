@@ -26,6 +26,8 @@ def set_bus(bus: MessageBus) -> None:
 
 async def _run(room_id: str, command: str, data: dict | None = None):
     """Execute a worker command and broadcast the results."""
+    if _bus is None:
+        raise HTTPException(status_code=503, detail="Engine bus not initialized")
     cr = await _bus.send_command(room_id, command, data)
     if cr.error:
         raise HTTPException(status_code=cr.status_code, detail=cr.error)

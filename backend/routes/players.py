@@ -280,11 +280,14 @@ async def update_player_scores(room_id: str, player_id: str, scores: Dict[str, f
     try:
         await db.execute(
             '''UPDATE players 
-               SET role_score = $1, system_score = $2, overall_score = $3, updated_at = CURRENT_TIMESTAMP
+               SET role_score = COALESCE($1, role_score),
+                   system_score = COALESCE($2, system_score),
+                   overall_score = COALESCE($3, overall_score),
+                   updated_at = CURRENT_TIMESTAMP
                WHERE player_id = $4 AND room_id = $5''',
-            scores.get("roleScore", 0),
-            scores.get("systemScore", 0),
-            scores.get("overallScore", 0),
+            scores.get("roleScore"),
+            scores.get("systemScore"),
+            scores.get("overallScore"),
             player_id,
             room_id
         )

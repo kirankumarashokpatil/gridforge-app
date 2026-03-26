@@ -15,6 +15,9 @@ All logic lives in dedicated modules:
 
 import os
 import json
+import logging
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -28,8 +31,27 @@ from engine import game_loop
 from room_worker import RoomWorker
 from bus import create_bus
 
+log = logging.getLogger("gridforge.server")
+
+# ── WS heartbeat rate limiter (per-player, in-process) ─────────────────────
+# Limits relay of ping/heartbeat/typing to 5 messages/second per player.
+_ws_relay_timestamps: dict[str, list[float]] = defaultdict(list)
+_WS_RELAY_RATE = 5  # max messages per second
+
+
+def _ws_relay_allowed(player_id: str) -> bool:
+    """Return True if the player has not exceeded the WS relay rate limit."""
+    now = time.time()
+    ts = _ws_relay_timestamps[player_id]
+    # Prune timestamps older than 1 second
+    ts[:] = [t for t in ts if now - t < 1.0]
+    if len(ts) >= _WS_RELAY_RATE:
+        return False
+    ts.append(now)
+    return True
+
 # Route modules
-from routes.rooms import router as rooms_router
+from routes.rooms import router as rooms_router, set_worker
 from routes.players import router as players_router
 from routes.bids import router as bids_router
 from routes.events import router as events_router
@@ -48,6 +70,7 @@ async def lifespan(app: FastAPI):
     await db.connect()
     await bus.start()
     set_bus(bus)
+    set_worker(worker)
     yield
     await bus.stop()
     await db.disconnect()
@@ -154,14 +177,20 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 message = json.loads(raw)
             except (json.JSONDecodeError, ValueError):
-                continue  # silently drop malformed frames
+                log.debug("[ws] malformed frame from room=%s player=%s", room_id, player_id)
+                continue
 
             # Only relay whitelisted client-originated message types.
             # All game-state mutations flow through REST→bus→worker;
             # the WS receive path is kept for heartbeats / typing indicators only.
             msg_type = message.get("type")
             if msg_type in ("ping", "heartbeat", "typing"):
-                await manager.broadcast_to_room(room_id, message)
+                # Rate-limit relay: max _WS_RELAY_RATE messages/second per player
+                relay_key = player_id or room_id
+                if _ws_relay_allowed(relay_key):
+                    await manager.broadcast_to_room(room_id, message)
+                else:
+                    log.debug("[ws] relay rate-limited for %s", relay_key)
     except WebSocketDisconnect:
         manager.disconnect(room_id, websocket)
 

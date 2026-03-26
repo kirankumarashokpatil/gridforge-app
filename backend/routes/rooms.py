@@ -10,8 +10,18 @@ from fastapi import APIRouter, HTTPException
 from db import db
 from ws import manager
 from engine import game_loop
+# Import the singleton worker so delete_room can evict the in-memory lock
+from room_worker import RoomWorker as _RoomWorkerType
 
 router = APIRouter(prefix="/api/rooms", tags=["rooms"])
+
+# Set by server.py at startup (same pattern as set_bus in routes/engine.py)
+_worker: _RoomWorkerType | None = None
+
+
+def set_worker(worker: _RoomWorkerType) -> None:
+    global _worker
+    _worker = worker
 
 
 @router.post("/{room_id}")
@@ -46,10 +56,30 @@ async def get_room_meta(room_id: str):
 
 @router.delete("/{room_id}")
 async def delete_room(room_id: str):
-    """Delete a room and all its players/bids (used by E2E tests to clean up stale data)"""
+    """Delete a room and all its data (used by E2E tests and admin tooling).
+
+    Deletes child tables in FK-safe order before removing rooms, so there are
+    no constraint violations when the same room_id is reused in a later test run.
+    """
     try:
-        await db.execute("DELETE FROM players WHERE room_id = $1", room_id)
-        await db.execute("DELETE FROM rooms WHERE room_id = $1", room_id)
+        # Child tables must be deleted before players/rooms (FK ordering)
+        await db.execute("DELETE FROM event_log  WHERE room_id = $1", room_id)
+        await db.execute("DELETE FROM events     WHERE room_id = $1", room_id)
+        await db.execute("DELETE FROM contracts  WHERE room_id = $1", room_id)
+        await db.execute("DELETE FROM id_bids    WHERE room_id = $1", room_id)
+        await db.execute("DELETE FROM da_curves  WHERE room_id = $1", room_id)
+        await db.execute("DELETE FROM da_bids    WHERE room_id = $1", room_id)
+        await db.execute("DELETE FROM bm_bids    WHERE room_id = $1", room_id)
+        await db.execute("DELETE FROM players    WHERE room_id = $1", room_id)
+        await db.execute("DELETE FROM rooms      WHERE room_id = $1", room_id)
+
+        # Evict in-memory game state and advance lock so the next run starts clean
+        if _worker is not None:
+            _worker.cleanup_room(room_id)
+        else:
+            # Fallback: evict only the game-loop state (lock stays but is harmless)
+            game_loop._room_states.pop(room_id, None)
+
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

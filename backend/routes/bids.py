@@ -25,15 +25,16 @@ _bid_timestamps: Dict[str, List[float]] = {}
 _RATE_LIMIT_PER_SEC = 10
 
 
-def _check_rate_limit(player_id: str) -> None:
+def _check_rate_limit(room_id: str, player_id: str) -> None:
     """Raise 429 if player exceeds bid rate limit."""
     now = time.time()
-    timestamps = _bid_timestamps.get(player_id, [])
+    key = f"{room_id}:{player_id}"
+    timestamps = _bid_timestamps.get(key, [])
     timestamps = [t for t in timestamps if now - t < 1.0]
     if len(timestamps) >= _RATE_LIMIT_PER_SEC:
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
     timestamps.append(now)
-    _bid_timestamps[player_id] = timestamps
+    _bid_timestamps[key] = timestamps
 
 
 # ── bid validation helpers ────────────────────────────────────────────
@@ -175,7 +176,7 @@ async def put_bm_bid(room_id: str, sp: int, player_id: str, bid: Dict[str, Any])
     """Submit BM bid"""
     _validate_bid(bid)
     _check_gate_open(room_id, "bm")
-    _check_rate_limit(player_id)
+    _check_rate_limit(room_id, player_id)
     _check_avail_mw(room_id, player_id, bid.get("mw", 0))
     await _verify_player_in_room(room_id, player_id)
     try:
@@ -258,7 +259,7 @@ async def put_da_bid(room_id: str, cycle: int, player_id: str, bid: Dict[str, An
     """Submit DA bid"""
     _validate_bid(bid)
     _check_gate_open(room_id, "da")
-    _check_rate_limit(player_id)
+    _check_rate_limit(room_id, player_id)
     await _verify_player_in_room(room_id, player_id)
     try:
         await db.execute(
@@ -295,8 +296,8 @@ async def put_da_bid(room_id: str, cycle: int, player_id: str, bid: Dict[str, An
                 "asset": bid.get("asset"),
                 "name": bid.get("name"),
             }])
-        except Exception:
-            pass  # Non-fatal: DA clear will still run with whatever state is present
+        except Exception as sync_err:
+            raise HTTPException(status_code=500, detail=f"DA bid engine sync failed: {sync_err}")
 
         da_payload = {**bid, "id": player_id, "player_id": player_id, "cycle": cycle}
         await manager.broadcast_to_room(room_id, {"type": "da_bid", "cycle": cycle, "data": da_payload})
@@ -312,7 +313,7 @@ async def put_da_curve(room_id: str, player_id: str, curve: Dict[str, Any]):
     """Submit DA curve"""
     _validate_da_curve(curve)
     _check_gate_open(room_id, "da_curve")
-    _check_rate_limit(player_id)
+    _check_rate_limit(room_id, player_id)
     await _verify_player_in_room(room_id, player_id)
     try:
         await db.execute(
@@ -381,7 +382,7 @@ async def put_id_bid(room_id: str, sp: int, player_id: str, bid: Dict[str, Any])
     """Submit ID bid"""
     _validate_bid(bid)
     _check_gate_open(room_id, "id")
-    _check_rate_limit(player_id)
+    _check_rate_limit(room_id, player_id)
     await _verify_player_in_room(room_id, player_id)
     try:
         await db.execute(
@@ -422,8 +423,8 @@ async def put_id_bid(room_id: str, sp: int, player_id: str, bid: Dict[str, Any])
                 "price": float(bid.get("price", 0)),
             })
             game_loop.submit_id_orders(room_id, player_id, updated)
-        except Exception:
-            pass  # Non-fatal: advance-day will still try to load from DB
+        except Exception as sync_err:
+            raise HTTPException(status_code=500, detail=f"ID bid engine sync failed: {sync_err}")
 
         return {"success": True}
     except Exception as e:
