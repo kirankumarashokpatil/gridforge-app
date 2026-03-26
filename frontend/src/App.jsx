@@ -645,6 +645,9 @@ export default function App() {
             if (state.daAuctionResults) setDaAuctionResults(state.daAuctionResults);
             if (state.playerScores) setPlayerScores(state.playerScores);
             if (state.systemState) setSystemState(state.systemState);
+            // Sync timer state so auto-advance fires correctly at FORECAST_0
+            if (state.phaseStartTs) setPhaseStartTs(state.phaseStartTs);
+            if (state.tickSpeed) setTickSpeed(state.tickSpeed);
           }
         }
       } catch (err) {
@@ -737,6 +740,9 @@ export default function App() {
             if (state.replayData) setReplayData(state.replayData);
             if (state.replayIdx !== undefined) setReplayIdx(state.replayIdx);
             if (state.showDebrief !== undefined) setShowDebrief(state.showDebrief);
+            // Sync timer state so auto-advance fires correctly at FORECAST_0
+            if (state.phaseStartTs) setPhaseStartTs(state.phaseStartTs);
+            if (state.tickSpeed) setTickSpeed(state.tickSpeed);
           }
         }
       } catch (err) {
