@@ -250,7 +250,8 @@ export function buildElexonStats(spContracts, spHistory = []) {
                     (c.settlement.bmCash || 0) +
                     (c.settlement.imbCash || 0) +
                     (c.settlement.startupCost || 0) +
-                    (c.settlement.operatingCost || 0);
+                    (c.settlement.operatingCost || 0) +
+                    (c.settlement.bsuoSCharge || 0);
                 const actual = c.settlement.totalCash || 0;
                 totalError += Math.abs(expected - actual);
             }

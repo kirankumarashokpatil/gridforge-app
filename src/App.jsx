@@ -614,7 +614,7 @@ export default function App() {
           setPhysicalState(pState);
         }
 
-        if (market.actual.trippedAssets?.includes(ak)) {
+        if (settledMarket.actual.trippedAssets?.includes(ak)) {
           // BUG FIX: For DSR with pending rebound debt, don't zero out - set forced rebound state
           const isDsr = myDef.kind === "dsr";
           if (isDsr && pState.pendingReboundMwh > 0 && pState.reboundSpsRemaining === 0) {
@@ -707,13 +707,13 @@ export default function App() {
         }
 
         const deviation = actualPhysical - contractPosMw;
-        const imbPrc = market.actual.isShort ? market.actual.sbp * 1.05 : market.actual.ssp * 0.95;
+        const imbPrc = settledMarket.actual.isShort ? settledMarket.actual.sbp * 1.05 : settledMarket.actual.ssp * 0.95;
         const isForgive = gameMode === "TUTORIAL";
         // Bug #9 fix: signed deviation — over-delivery (positive into short) should earn, not penalize
         const forgiveMult = isForgive ? (FORGIVENESS.penaltyMultiplier || 0.5) : 1;
         const imbPen = deviation >= 0
-          ? (deviation * market.actual.ssp * SP_DURATION_H * forgiveMult)   // Over-delivery: sell excess at SSP
-          : (deviation * market.actual.sbp * SP_DURATION_H * forgiveMult);  // Under-delivery: buy shortfall at SBP
+          ? (deviation * settledMarket.actual.ssp * SP_DURATION_H * forgiveMult)   // Over-delivery: sell excess at SSP
+          : (deviation * settledMarket.actual.sbp * SP_DURATION_H * forgiveMult);  // Under-delivery: buy shortfall at SBP
 
         // Deduct Variable Cost (Fuel/Wear) - Note: storage 'wear' is based on throughput (absolute MW)
         const varCostMwh = myDef.varCost || myDef.wear || 0;
@@ -726,9 +726,9 @@ export default function App() {
         let newC = refs.current.cash + totalSpRev;
 
         // Margin liquidation for traders
-        if (role === "TRADER" && (newC + refs.current.daCash) < ROLES.TRADER.marginFloor) {
-          const loss = ROLES.TRADER.marginFloor - (newC + refs.current.daCash);
-          newC = ROLES.TRADER.marginFloor - refs.current.daCash;
+        if (role === "TRADER" && newC < ROLES.TRADER.marginFloor) {
+          const loss = ROLES.TRADER.marginFloor - newC;
+          newC = ROLES.TRADER.marginFloor;
           setContractPosition(0); // Liquidate position
           addToast({ emoji: "💥", title: "Margin Call", body: `Cash fell below margin floor. Position liquidated. Loss: £${f0(loss)}`, col: "#f0455a" });
         }
@@ -754,15 +754,15 @@ export default function App() {
 
         // ─── SCORING ENGINE: compute scores after each SP ───
         const playerImbalance = deviation; // signed MW deviation
-        const systemNIV = market.actual.niv;
+        const systemNIV = settledMarket.actual.niv;
         const spImpact = computePlayerSystemImpact(playerImbalance, systemNIV);
         const isStressSP = Math.abs(systemNIV) > (SCORING_CONFIG.stressNIVThreshold || 300);
         const deliveredOk = Math.abs(deviation) < 5; // within 5MW tolerance
 
         // Update system state
         setSystemState(prev => {
-          const balancingCost = Math.abs(market.actual.niv) * (market.actual.sbp || 50) * 0.01;
-          const updated = updateSystemState(prev, { sp, niv: systemNIV, balancingCost, freq: market.actual.freq, blackout: false });
+          const balancingCost = Math.abs(settledMarket.actual.niv) * (settledMarket.actual.sbp || 50) * 0.01;
+          const updated = updateSystemState(prev, { sp, niv: systemNIV, balancingCost, freq: settledMarket.actual.freq, blackout: false });
           updated.playerImpacts = updatePlayerImpact(prev.playerImpacts, id, spImpact, isStressSP, deliveredOk);
           return updated;
         });
