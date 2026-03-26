@@ -1,0 +1,101 @@
+## 1. Game State Machine Integrity
+
+- **Phase transitions are exhaustive and correct**: Every path through `_DAY_PHASE_SEQ` (FORECAST_0 → DA → … → RESULTS) advances properly, including when game modes skip phases (e.g. no IDA). Verify no phase is skipped or repeated.
+- **Per-SP sub-loop in REALTIME**: BM_OPEN → BM_CLEAR → SP_SETTLED runs exactly 48 times (SP 1–48), then transitions to RESULTS.
+- **Advance idempotency**: Double-clicks or retried requests can't skip a phase — the `_validate_precondition()` check in room_worker.py rejects stale `expectedPhase`/`expectedSp`/`expectedBmSubPhase`.
+- **Advance lock**: `_get_advance_lock()` ensures concurrent advance requests for the same room are serialized.
+- **`phase_start_ts` always updated** on phase transitions so reconnecting clients anchor countdowns correctly.
+
+## 2. Market Clearing Correctness
+
+- **DA pay-as-clear**: Supply/demand curves cross at the right point; verify with edge cases (no bids, all same price, one-sided market, ties).
+- **IDA clears correctly** for IDA1/IDA2 cycles and respects gate closure per SP.
+- **BM uniform pricing**: All accepted offers/bids paid at the marginal clearing price, not pay-as-bid.
+- **ID continuous trading**: Bilateral matches execute at the correct price; partial fills handled.
+- **NIV sign**: Net Imbalance Volume correctly determines system long vs short, flipping which side gets dispatched.
+- **Edge cases**: Zero-volume bids rejected (schema enforces `mw > 0`), negative prices allowed (valid in GB markets), bot bids flagged correctly.
+
+## 3. Physical Asset Constraints
+
+- **SoC/SoF bounds**: Battery never charges above `MAX_SOC` (90%) or discharges below `MIN_SOC` (10%). Hydro SoF depletes correctly.
+- **Ramp rates**: Thermal units with `startupTime > 0` don't instant-on; startup costs applied.
+- **Weather-driven output**: Wind/solar capped at `maxMW × wf/sf`, not exceeding physical capacity.
+- **Efficiency losses**: BESS charging applies `def.eff` round-trip losses.
+- **`availMW` / `availMWDirectional`**: Used for bid validation — players can't bid more MW than their asset can physically deliver.
+
+## 4. Settlement & Scoring
+
+- **Imbalance settlement**: Players' contracted positions (DA + ID) vs actual metered output → imbalance MW → imbalance cash at system prices (SBP/SSP).
+- **Cash accounting**: `cash` and `da_cash` columns accumulate correctly; no double-counting DA revenue in BM settlement.
+- **Role score (0–100)**: Each role's KPIs correctly weighted per `SCORING_CONFIG`.
+- **System score**: Aggregated grid health metric (frequency deviation, reserve margin, NIV minimisation).
+- **Overall score**: Blend of role + system scores; leaderboard ranking is deterministic (tiebreaker defined).
+
+## 5. Multiplayer Synchronisation
+
+- **Server-authoritative state**: Client no longer runs `marketForSp()`, `clearFullAuction()`, or `checkAchievements` — all from server. Verify no client-side logic can override server state.
+- **WebSocket delta protocol**: `_v` monotonically increases per room; reconnecting client with `lastVersion` gets exactly the missed messages or a full snapshot if the gap exceeds 200.
+- **Broadcast completeness**: Every state mutation in `RoomWorker` returns the right `broadcasts` — missing a broadcast = desynced clients.
+- **GunDB removal**: README still references GunDB/P2P, but archiecture notes say it's now server-authoritative with PostgreSQL. Verify GunDB is actually removed from code (stale README).
+
+## 6. Reconnection & Resilience
+
+- **WS reconnect**: `websocket_endpoint` sends `state_snapshot` on connect — verify it includes full room state (phase, SP, markets, player positions, SoC/SoF).
+- **Player DISCONNECTED status**: `last_seen` heartbeat identifies stale players; verify the game proceeds even if a player disconnects mid-phase.
+- **Room isolation mode**: With `ROOM_ISOLATION=1`, per-room subprocesses (`room_process.py`) survive individual room crashes without taking down other rooms.
+- **Redis failover**: If `REDIS_URL` is set but Redis goes down, verify graceful degradation or clear error messaging.
+
+## 7. Security & Input Validation
+
+- **CORS**: Currently `allow_origins=["*"]` in server.py — acceptable for dev/workshops, but should be locked down for production.
+- **SQL injection**: Using asyncpg parameterised queries (not string interpolation) — verify everywhere in db.py.
+- **Bid validation at system boundary**: `mw > 0` enforced by DB `CHECK` constraints + server-side validation before insert. Price bounds checked.
+- **Room code enumeration**: 4-letter room codes are small keyspace (~460k). For a workshop setting this is fine; for public deployment, add rate limiting.
+- **Player impersonation**: Verify `player_id` comes from session, not just a client-supplied field that anyone could spoof.
+- **WebSocket auth**: Is there any authentication on WS connect, or can anyone join a room's WS feed by guessing the room code?
+
+## 8. Concurrency & Race Conditions
+
+- **Simultaneous bid submission**: Multiple players submitting bids at the exact same moment — DB `PRIMARY KEY (room_id, sp, player_id)` ensures one bid per player per SP, so late submission overwrites.
+- **Phase advance during bid submission**: A player submits a BM bid at the exact moment the phase advances to BM_CLEAR — verify the bid is either accepted (arrived before clear) or rejected (gate closed).
+- **NESO election race**: First player to join becomes NESO — verify the "first" check is atomic and doesn't produce two NESOs.
+
+## 9. Forecast Engine
+
+- **Deterministic RNG**: `room_seed` mixed into all `_rng()` calls — same seed = same market conditions. Verify replays produce identical results.
+- **Error reduction**: FORECAST_0 → _1 → _2 progressively shrinks uncertainty. Verify the final forecast bounds still contain the actuals.
+- **Wind/solar/demand coherence**: Forecasts and actuals use the same underlying model; demand doesn't wildly diverge from forecast in ways that make the game unplayable.
+
+## 10. End-to-End Game Flow
+
+- **Full 48-SP game**: Run a complete day from FORECAST_0 through RESULTS with multiple roles. Verify no crash, no stale state, all SPs settled, leaderboard computed.
+- **Multiple days (rollover)**: RESULTS → FORECAST_0 starts a new day; verify SP resets to 1, cash carries over, SoC/SoF is preserved or reset per design.
+- **Game modes**: Each mode in `GAME_MODES` correctly disables/enables the right phases and markets.
+- **Instructor events**: Injected events (e.g. wind drop, demand surge) correctly modify market conditions for subsequent SPs.
+- **Achievements**: All achievement conditions in achievements.py are reachable and trigger correctly.
+
+## 11. Frontend Consistency
+
+- **Field name normalisation**: `player_id` :left_right_arrow: `id`, `assignedAssetKey` :left_right_arrow: `asset`, camelCase :left_right_arrow: snake_case — the historic source of many bugs (see known issues). Verify `normalizePlayer()` handles every field.
+- **Timer synchronisation**: Phase countdown = `phase_start_ts + tick_speed - now`. Verify no drift across clients.
+- **Role screen routing**: Each role (GENERATOR, BESS, DSR, NESO, SUPPLIER, TRADER, ELEXON) renders the correct screen with the correct capabilities.
+- **`game_init` transition**: Asset-owning roles must pass through the init screen that sets SoC/physicalState before entering the main game screen.
+
+## 12. Deployment & Ops
+
+- **Docker build**: Dockerfile builds cleanly; `.dockerignore` excludes `__pycache__`, `.env`, `radata/`.
+- **Schema migration**: schema.sql must be applied before first run. Verify no migration drift (columns added in code but missing from schema).
+- **Environment variables**: `REDIS_URL`, `ROOM_ISOLATION`, `DATABASE_URL` — verify defaults work for local dev, and production values are documented.
+- **Graceful shutdown**: `lifespan` context manager disconnects DB and stops bus on shutdown.
+
+## 13. Existing Test Coverage Gaps
+
+You have solid unit tests for engines (MarketEngine.test.js, SettlementEngine.test.js, etc.) and E2E tests for multiplayer flows. I'd check for:
+
+- **No backend Python unit tests** for the engine modules — test_engine.py, test_bugfixes.py exist at root but verify they cover game_loop.py, `market_engine.py`, `settlement_engine.py` server-side logic.
+- **Network chaos tests** (network-chaos.test.cjs) — verify they actually simulate WS drops and reconnections, not just API errors.
+- **No load/stress test**: 20+ concurrent players in one room, high-frequency bid submission, verify response times and no state corruption.
+
+---
+
+This is roughly 50+ checkpoints. The highest-risk areas for a game like this are **phase-advance idempotency** (one double-click shouldn't skip a phase), **market clearing correctness** (wrong prices = broken gameplay), and **reconnection state** (a student refreshing their browser mid-game shouldn't lose everything). Those three would be my top priorities every release.

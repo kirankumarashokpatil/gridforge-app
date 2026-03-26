@@ -97,7 +97,7 @@ export function buildPlayerStats(role, data) {
 
     const def = ASSETS[assetKey] || {};
     const totalSPs = spHistory.length;
-    const netProfit = cash + daCash;
+    const netProfit = cash;
 
     // Compute revenue components from SP history
     let totalBmRev = 0;

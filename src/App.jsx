@@ -150,7 +150,7 @@ export default function App() {
     pendingReboundMwh: 0,
   });
 
-  const refs = useRef({}); refs.current = { sp, phase, phaseStartTs, soc, cash, daCash, imbalancePenalty, submitted, pid, name, room, asset, assetConfig, isInstructor, scenarioId: roomScenario, gameMode, role, contractPosition, orderBookSnap: orderBook, daOrderBookSnap: daOrderBook, idOrderBookSnap: idOrderBook, spContracts, players, physicalState, msLeft, tickSpeed };
+  const refs = useRef({}); refs.current = { sp, phase, phaseStartTs, soc, cash, daCash, imbalancePenalty, submitted, pid, name, room, asset, assetConfig, isInstructor, scenarioId: roomScenario, gameMode, role, contractPosition, orderBookSnap: orderBook, daOrderBookSnap: daOrderBook, idOrderBookSnap: idOrderBook, spContracts, players, physicalState, msLeft, tickSpeed, market };
   const prevPhaseRef = useRef({ phase: "INIT", sp: 0 });
   const lastEventRef = useRef(null);
   const gmCfg = GAME_MODES[gameMode] || GAME_MODES.FULL;
@@ -277,7 +277,7 @@ export default function App() {
     if (!gun.current || !room) return;
     const { sp: currentSp, phase: currentPhase } = refs.current;
     const nextPhase = currentPhase === "DA" ? "ID" : currentPhase === "ID" ? "BM" : currentPhase === "BM" ? "SETTLED" : "DA";
-    const nextSp = currentPhase === "SETTLED" ? currentSp + 1 : currentSp;
+    const nextSp = currentPhase === "SETTLED" ? (currentSp >= 48 ? 1 : currentSp + 1) : currentSp;
     gun.current.get(roomKey(room, "meta")).put({ phase: nextPhase, sp: nextSp, phaseStartTs: Date.now() });
     addToast({ emoji: "✅", title: "Phase Advanced", body: `Moved to ${nextPhase}`, col: "#b78bfa" });
   }, [gun, room, addToast]);
@@ -479,13 +479,36 @@ export default function App() {
       // otherwise at fast tick speeds market.actual may belong to the NEXT SP.
       const settledMarket = market;
       setTimeout(() => {
+        // Pre-compute BSUoS socialisation charge so it is in scope for the local settlement below.
+        // This uses the contract data already written by DA/ID/BM close handlers (held in refs).
+        const bsuosIsForgive = gameMode === "TUTORIAL";
+        const bsuosPreContracts = refs.current.spContracts[settleSp] || {};
+        const bsuosPlayersArr = Object.values(refs.current.players || {});
+        let bsuosTotalImbCash = 0;
+        bsuosPlayersArr.forEach(p => {
+          const c = bsuosPreContracts[p.id] || {};
+          const pCtrMw = (c.daSide === "offer" ? (c.daMw || 0) : -(c.daMw || 0)) +
+            (c.idSide === "offer" ? (c.idMw || 0) : -(c.idMw || 0));
+          const pActMw = c.bmAccepted ? (settledMarket.actual.isShort ? c.bmAccepted.mw : -c.bmAccepted.mw) : 0;
+          let pPhys = pCtrMw + pActMw;
+          if (settledMarket.actual.trippedAssets?.includes(p.asset)) pPhys = 0;
+          const bs = computeImbalanceSettlement({
+            actualPhysicalMw: pPhys,
+            contractedMw: pCtrMw,
+            bmAcceptedMw: pActMw,
+            sbp: settledMarket.actual.sbp,
+            ssp: settledMarket.actual.ssp,
+            spDurationH: SP_DURATION_H,
+          });
+          bsuosTotalImbCash += bs.cash * (bsuosIsForgive ? (FORGIVENESS.penaltyMultiplier || 0.5) : 1);
+        });
+        const bsuoSCharge = bsuosPlayersArr.length > 0 ? -bsuosTotalImbCash / bsuosPlayersArr.length : 0;
+
         // Run global settlement calculations for Elexon & NESO visibility
         setSpContracts(prev => {
           const next = { ...prev };
           if (!next[settleSp]) next[settleSp] = {};
 
-          let totalImbCash = 0;
-          let numPlayers = 0;
           const playersArr = Object.values(refs.current.players || {});
 
           playersArr.forEach(p => {
@@ -530,13 +553,9 @@ export default function App() {
               totalCash: pDaRev + pIdRev + pBmRev + imbCash + operatingCost + startupCost,
             };
             next[settleSp][p.id] = c;
-            totalImbCash += imbCash;
-            numPlayers++;
           });
 
-          // Calculate BSUoS socialization and apply in same pass
-          const bsuoSCharge = numPlayers > 0 ? -totalImbCash / numPlayers : 0;
-
+          // Apply pre-computed BSUoS socialisation charge to all players
           Object.keys(next[settleSp] || {}).forEach(pid => {
             if (next[settleSp][pid]?.settlement) {
               next[settleSp][pid].settlement.bsuoSCharge = bsuoSCharge;
@@ -730,8 +749,8 @@ export default function App() {
           addToast({ emoji: "⚠️", title: "Imbalance Penalty", body: `Deviated ${f0(Math.abs(deviation))}MW! -£${f0(Math.abs(imbPen))}`, col: "#f0455a" });
         }
 
-        const accepted = !!mine; // Bug #1 fix: track whether player was dispatched
-        setSpHistory(prev => [{ sp, niv: market.actual.niv, cp: market.actual.sbp, sbp: market.actual.sbp, ssp: market.actual.ssp, wf: market.actual.wf, revenue: totalSpRev, event: market.actual.event, contractPosMw, actualPhysical, imbPrc, imbPen, daRev, bmRev, idRev, operatingCost, accepted, mw: mine?.mwAcc || 0, time: new Date().toLocaleTimeString() }, ...prev.slice(0, 47)]);
+        const accepted = !!(myC.bmAccepted);
+        setSpHistory(prev => [{ sp, niv: settledMarket.actual.niv, cp: settledMarket.actual.sbp, sbp: settledMarket.actual.sbp, ssp: settledMarket.actual.ssp, wf: settledMarket.actual.wf, revenue: totalSpRev, event: settledMarket.actual.event, contractPosMw, actualPhysical, imbPrc, imbPen, daRev, bmRev, idRev, operatingCost, accepted, mw: myC.bmAccepted?.mw || 0, time: new Date().toLocaleTimeString() }, ...prev.slice(0, 47)]);
 
         // ─── SCORING ENGINE: compute scores after each SP ───
         const playerImbalance = deviation; // signed MW deviation
@@ -966,7 +985,7 @@ export default function App() {
           <strong style={{ color: "#ddeeff" }}> All players lose — regardless of individual profit.</strong>
         </div>
         <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 11, color: "#f0455a", marginBottom: 24 }}>
-          Last freq: {market?.actual?.freq?.toFixed(3) || "??"}Hz · Total P&L: {fpp(cash + daCash)}
+          Last freq: {market?.actual?.freq?.toFixed(3) || "??"}Hz · Total P&L: {fpp(cash)}
         </div>
         <button onClick={() => { setBlackout(false); setFreqBreachSec(0); setScreen("lobby"); setCash(0); setDaCash(0); setSpHistory([]); }}
           style={{ padding: "10px 28px", background: "#1f0709", border: "2px solid #f0455a44", borderRadius: 8, color: "#f0455a", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "'Outfit'" }}>
@@ -1351,8 +1370,8 @@ function MarketCenter({ market, allBids, simRes, spHistory, pid, assetKey }) {
           <div style={{ marginLeft: "auto", display: "flex", gap: 8, fontSize: 8.5 }}>
             <span style={{ color: isShort ? "#f0455a" : "#2a5570", fontWeight: 700 }}>{allBids.filter(b => b.side === "offer").length} sellers</span>
             <span style={{ color: !isShort ? "#1de98b" : "#2a5570", fontWeight: 700 }}>{allBids.filter(b => b.side === "bid").length} buyers</span>
-            <span style={{ color: "#38c0fc", fontWeight: 700 }}>{f0(simRes.cleared)} MW cleared</span>
-            {simRes.full && <span style={{ color: "#1de98b", fontWeight: 800 }}>✓ FULL</span>}
+            <span style={{ color: "#38c0fc", fontWeight: 700 }}>{f0(simRes?.cleared ?? 0)} MW cleared</span>
+            {simRes?.full && <span style={{ color: "#1de98b", fontWeight: 800 }}>✓ FULL</span>}
           </div>
         </div>
         <div style={{ flex: 1, minHeight: 0, display: "flex" }}>

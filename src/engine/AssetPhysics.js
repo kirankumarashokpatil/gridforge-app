@@ -19,6 +19,8 @@ export function availMW(def, sofuel, market) {
     if (def.kind === "solar") return clamp(Math.round(sf * def.maxMW), 0, def.maxMW);
     if (def.kind === "fuel") return clamp(sofuel / SP_DURATION_H, 0, def.maxMW);
     if (def.kind === "none") return def.maxMW;
+    if (def.kind === "dsr") return def.maxMW;
+    if (def.kind === "interconnector") return def.maxMW;
     return 0;
 }
 
