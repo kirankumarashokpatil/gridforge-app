@@ -100,6 +100,14 @@ function roleChecklist(roleName, phase) {
 
 export { Tip, TS, f0, fpp };
 
+// ID gate-closure batch schedule (must match backend _ID_GC_BATCHES)
+const _ID_GC_BATCHES = [
+    [1, 12],    // round 0 → close SPs 1-12
+    [13, 24],   // round 1 → close SPs 13-24
+    [25, 36],   // round 2 → close SPs 25-36
+    [37, 48],   // round 3 → close SPs 37-48
+];
+
 export default function SharedLayout({
     roleName,
     phase,
@@ -121,7 +129,9 @@ export default function SharedLayout({
     center,
     right,
     bottom,
-    hint
+    hint,
+    idRound = 0,
+    spTimeline = {},
 }) {
     const [showForecast, setShowForecast] = useState(false);
     const [selectedSP, setSelectedSP] = useState(null);
@@ -147,7 +157,17 @@ export default function SharedLayout({
     // Bug fix: cash already includes daCash (settled DA revenue is accumulated into cash)
     const totalPL = cash || 0;
     const playerCount = leaderboard?.filter(p => p.role !== "instructor")?.length || 0;
-    const nextPhase = NEXT_PHASE[phase] || "—";
+    const nextPhase = (() => {
+        if (phase === "ID_ROUNDS") {
+            const batchIdx = Math.min(idRound, _ID_GC_BATCHES.length - 1);
+            const [lo, hi] = _ID_GC_BATCHES[batchIdx] || [1, 12];
+            const isLast = idRound >= _ID_GC_BATCHES.length - 1;
+            return isLast
+                ? `Close SPs ${lo}-${hi} → REALTIME`
+                : `ID ${idRound + 1}/${_ID_GC_BATCHES.length}: Close SPs ${lo}-${hi}`;
+        }
+        return NEXT_PHASE[phase] || "—";
+    })();
     const gateOpen = ["REALTIME", "BM", "BM_OPEN"].includes(phase) && msLeft > 0;
     const gateLabel = ["REALTIME", "BM", "BM_OPEN", "BM_CLEAR", "BM_CLOSE", "SP_SETTLED"].includes(phase)
         ? (gateOpen ? "OPEN" : "CLOSED")

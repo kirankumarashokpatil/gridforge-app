@@ -422,7 +422,28 @@ def advance_day_phase(room_id: str) -> dict:
         result.update(_on_ida_close_all(snap, old_phase))
 
     elif old_phase == "ID_ROUNDS":
-        result.update(_on_id_close(snap))
+        # Run one ID gate-closure sub-round (closes next batch of 12 SPs,
+        # matches their order books, advances idRound counter).
+        sub = _advance_id_sub_round(snap)
+        result.update(sub)
+
+        if sub.get("idRoundsComplete"):
+            # All 4 batches done → freeze positions and enter REALTIME.
+            result.update(_freeze_positions_after_id(snap))
+            snap["dayPhase"] = "REALTIME"
+            snap["currentSp"] = 1
+            snap["bmSubPhase"] = "BM_OPEN"
+            snap["bmOrderBook"] = {}
+            _recompute_niv_for_sp(snap, 1)
+        else:
+            # More sub-rounds remain → STAY in ID_ROUNDS.
+            snap["dayPhase"] = "ID_ROUNDS"
+            snap["phaseStartTs"] = int(time.time() * 1000)
+            _apply_phase_tick(snap)
+            result["newPhase"] = "ID_ROUNDS"
+            result["currentSp"] = snap.get("currentSp", 0)
+            _room_states[room_id] = snap
+            return result
 
     elif old_phase == "REALTIME":
         return {"error": "Use advance_bm() during REALTIME phase",
@@ -441,12 +462,8 @@ def advance_day_phase(room_id: str) -> dict:
     # --- Determine next phase ---
 
     if old_phase == "ID_ROUNDS":
-        # After ID_ROUNDS, always enter REALTIME
-        snap["dayPhase"] = "REALTIME"
-        snap["currentSp"] = 1
-        snap["bmSubPhase"] = "BM_OPEN"
-        snap["bmOrderBook"] = {}
-        _recompute_niv_for_sp(snap, 1)
+        # Phase already set to REALTIME above (idRoundsComplete branch).
+        pass
     else:
         snap["dayPhase"] = _next_day_phase(old_phase, snap)
         # If we jumped straight to REALTIME (e.g. TUTORIAL skips DA/IDA/ID)
@@ -1086,6 +1103,33 @@ def _on_id_close(rs: dict) -> dict:
         "positionsFrozen": True,
         "playerIdSummaries": player_id_summaries,
     }
+
+
+def _freeze_positions_after_id(rs: dict) -> dict:
+    """Freeze final contracted positions after all ID sub-rounds complete.
+
+    Called once when the last ID_GC_BATCH is processed.  Stores a snapshot
+    of positions for BM reference and emits the ID_CLOSED event so cold-start
+    replay can reconstruct state correctly.
+
+    Note: position and cash deltas were already applied per sub-round by
+    _advance_id_sub_round, so no additional clearing is needed here.
+    """
+    rs["frozenPositions"] = {
+        pid: dict(sps) for pid, sps in rs["positions"].items()
+    }
+
+    _emit(rs, "ID_CLOSED", {
+        "tradesMatched": 0,         # individual rounds already emitted ID_GC_ROUND
+        "totalVolumeMW": 0,
+        "positionsFrozen": True,
+        "positionDeltas": {},
+        "cashDeltas": {},
+        "playerIdSummaries": {},
+        "replayState": _build_replay_state(rs),
+    })
+
+    return {"positionsFrozen": True}
 
 
 # ═══════════════════════════════════════════════

@@ -295,6 +295,8 @@ class RoomWorker:
                 "publishedForecast": pf,
                 "currentMarket": current_market,
                 "phaseInfo": GB_PHASE_TABLE.get(rs["dayPhase"]),
+                "idRound": rs.get("idRound", 0),
+                "spTimeline": rs.get("spTimeline", {}),
             }
             if result.get("marketsGenerated") or result.get("marketsUpdated"):
                 broadcast_data["markets"] = rs["markets"]

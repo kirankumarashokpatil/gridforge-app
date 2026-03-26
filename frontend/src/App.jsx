@@ -57,6 +57,8 @@ export default function App() {
   const [bmSubPhase, setBmSubPhase] = useState(null); // BM_OPEN / BM_CLEAR / SP_SETTLED during REALTIME
   const [day, setDay] = useState(1);           // Current trading day
   const [phaseStartTs, setPhaseStartTs] = useState(0);
+  const [idRound, setIdRound] = useState(0);      // 0-4: which ID gate-closure sub-round we're on
+  const [spTimeline, setSpTimeline] = useState({}); // per-SP gate-closure and BM state
   const [market, setMarket] = useState(null); // Current SP market { forecast, actual }
   const [msLeft, setMsLeft] = useState(TICK_MS);
   const [soc, setSoc] = useState(50);
@@ -329,6 +331,8 @@ export default function App() {
       if (data?.day !== undefined) setDay(data.day);
       if (data?.phaseStartTs) setPhaseStartTs(data.phaseStartTs);
       if (data?.tickSpeed) setTickSpeed(data.tickSpeed);
+      if (data?.idRound !== undefined) setIdRound(data.idRound);
+      if (data?.spTimeline) setSpTimeline(data.spTimeline);
       if (data?.paused !== undefined) setPaused(data.paused);
       if (data?.advanceMode) setAdvanceMode(data.advanceMode);
       if (data?.simSpeedId) setSimSpeedId(data.simSpeedId);
@@ -656,6 +660,8 @@ export default function App() {
             // Sync timer state so auto-advance fires correctly at FORECAST_0
             if (state.phaseStartTs) setPhaseStartTs(state.phaseStartTs);
             if (state.tickSpeed) setTickSpeed(state.tickSpeed);
+            if (state.idRound !== undefined) setIdRound(state.idRound);
+            if (state.spTimeline) setSpTimeline(state.spTimeline);
           }
         }
       } catch (err) {
@@ -751,6 +757,8 @@ export default function App() {
             // Sync timer state so auto-advance fires correctly at FORECAST_0
             if (state.phaseStartTs) setPhaseStartTs(state.phaseStartTs);
             if (state.tickSpeed) setTickSpeed(state.tickSpeed);
+            if (state.idRound !== undefined) setIdRound(state.idRound);
+            if (state.spTimeline) setSpTimeline(state.spTimeline);
           }
         }
       } catch (err) {
@@ -883,6 +891,8 @@ export default function App() {
             if (state.bmSubPhase !== undefined) setBmSubPhase(state.bmSubPhase);
             if (state.phaseStartTs) setPhaseStartTs(state.phaseStartTs);
             if (state.tickSpeed) setTickSpeed(state.tickSpeed);
+            if (state.idRound !== undefined) setIdRound(state.idRound);
+            if (state.spTimeline) setSpTimeline(state.spTimeline);
           }
         } catch (_) {}
         return;
@@ -1636,6 +1646,8 @@ export default function App() {
       positions, daPositions, contracts,
       // ─── Live NIV during BM_OPEN ───
       liveNivData,
+      // ─── ID gate-closure state ───
+      idRound, spTimeline,
     };
 
     switch (role) {
