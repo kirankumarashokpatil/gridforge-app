@@ -33,6 +33,7 @@ from typing import Any
 import os
 import copy
 import time
+import json
 
 from .constants import (
     ASSETS, SP_DURATION_H, SPS_PER_DAY, FORGIVENESS, SCORING_CONFIG,
@@ -755,6 +756,7 @@ def _on_da_close_all(rs: dict) -> dict:
     avg_cp = round(sum(v["cp"] for v in all_results.values()) / len(all_results), 2) if all_results else None
     total_vol = sum(v["volume"] for v in all_results.values())
     _emit(rs, "DA_CLEARED", {"spsCleared": len(all_results), "avgClearingPrice": avg_cp, "totalVolumeMW": total_vol, "method": "simple"})
+
     return {"daResults": all_results, "spsCleared": len(all_results)}
 
 

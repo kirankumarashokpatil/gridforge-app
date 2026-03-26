@@ -4,6 +4,7 @@ Bid endpoints — BM, DA, DA curves, ID bids.
 
 import json
 import time
+import os
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
@@ -280,6 +281,21 @@ async def put_da_bid(room_id: str, cycle: int, player_id: str, bid: Dict[str, An
             bid.get("col"),
             bid.get("isBot", False)
         )
+
+        # Sync the DB write into the engine's in-memory DA order book so that
+        # advance_day_phase → _on_da_close_all() clears against real bids.
+        # DA simple bids have no per-SP granularity (sp=None means all 48 SPs).
+        # Pattern mirrors put_id_bid → submit_id_orders.
+        try:
+            game_loop.submit_da_bids(room_id, player_id, [{
+                "side": bid.get("side"),
+                "mw": float(bid.get("mw", 0)),
+                "price": float(bid.get("price", 0)),
+                "asset": bid.get("asset"),
+                "name": bid.get("name"),
+            }])
+        except Exception:
+            pass  # Non-fatal: DA clear will still run with whatever state is present
 
         await manager.broadcast_to_room(room_id, {"type": "da_bid", "cycle": cycle, "data": bid})
         return {"success": True}
