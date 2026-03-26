@@ -1,10 +1,13 @@
 """
-GridForge WebSocket Manager — connection pool, delta protocol, event flush, advance guards.
+GridForge WebSocket Manager — connection pool, delta protocol, and event flush.
+
+Advance guards are implemented in room_worker.py.
 """
 
 import json
 import asyncio
 import os
+import time
 from collections import deque
 from typing import Optional, Dict, Any, Set, List
 
@@ -110,13 +113,19 @@ async def flush_events(room_id: str, pending_events: list) -> None:
         return
     try:
         rows = [
-            (room_id, ev["sequence"], ev["event_type"], json.dumps(ev["data"]))
+            (
+                room_id,
+                ev["sequence"],
+                int(ev.get("occurred_at") or int(time.time() * 1000)),
+                ev["event_type"],
+                json.dumps(ev["data"]),
+            )
             for ev in pending_events
         ]
         async with db.pool.acquire() as conn:
             await conn.executemany(
-                "INSERT INTO event_log (room_id, sequence, event_type, data) "
-                "VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT DO NOTHING",
+                "INSERT INTO event_log (room_id, sequence, occurred_at, event_type, data) "
+                "VALUES ($1, $2, to_timestamp($3 / 1000.0), $4, $5::jsonb) ON CONFLICT DO NOTHING",
                 rows,
             )
     except Exception as exc:

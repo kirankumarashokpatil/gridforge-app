@@ -4,7 +4,8 @@ GridForge FastAPI Server — thin assembly.
 
 All logic lives in dedicated modules:
   db.py          — Database class + schema
-  ws.py          — WebSocket ConnectionManager + event flush + advance guards
+    ws.py          — WebSocket ConnectionManager + event flush
+    room_worker.py — Game commands + advance guards + stale precondition checks
   routes/rooms   — Room CRUD
   routes/players — Player CRUD + NESO election
   routes/bids    — BM / DA / DA-curve / ID bid endpoints

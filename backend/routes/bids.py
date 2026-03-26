@@ -213,7 +213,8 @@ async def put_bm_bid(room_id: str, sp: int, player_id: str, bid: Dict[str, Any])
         all_bids = list(rs.get("bmOrderBook", {}).values())
         indic = compute_indicative_residual(raw_niv, is_short, all_bids)
 
-        await manager.broadcast_to_room(room_id, {"type": "bm_bid", "sp": sp, "data": bid})
+        bm_payload = {**bid, "id": player_id, "player_id": player_id, "sp": sp}
+        await manager.broadcast_to_room(room_id, {"type": "bm_bid", "sp": sp, "data": bm_payload})
         # Separate broadcast for live NIV (picked up by meta channel subscribers)
         await manager.broadcast_to_room(room_id, {
             "type": "bm_niv_update", "sp": sp,
@@ -297,7 +298,8 @@ async def put_da_bid(room_id: str, cycle: int, player_id: str, bid: Dict[str, An
         except Exception:
             pass  # Non-fatal: DA clear will still run with whatever state is present
 
-        await manager.broadcast_to_room(room_id, {"type": "da_bid", "cycle": cycle, "data": bid})
+        da_payload = {**bid, "id": player_id, "player_id": player_id, "cycle": cycle}
+        await manager.broadcast_to_room(room_id, {"type": "da_bid", "cycle": cycle, "data": da_payload})
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -346,7 +348,8 @@ async def put_da_curve(room_id: str, player_id: str, curve: Dict[str, Any]):
             "ts": curve.get("ts", int(datetime.now().timestamp() * 1000)),
         })
 
-        await manager.broadcast_to_room(room_id, {"type": "da_curve", "player_id": player_id, "data": curve})
+        curve_payload = {**curve, "player_id": player_id}
+        await manager.broadcast_to_room(room_id, {"type": "da_curve", "player_id": player_id, "data": curve_payload})
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -403,7 +406,8 @@ async def put_id_bid(room_id: str, sp: int, player_id: str, bid: Dict[str, Any])
             bid.get("isBot", False)
         )
 
-        await manager.broadcast_to_room(room_id, {"type": "id_bid", "sp": sp, "data": bid})
+        id_payload = {**bid, "id": player_id, "player_id": player_id, "sp": sp}
+        await manager.broadcast_to_room(room_id, {"type": "id_bid", "sp": sp, "data": id_payload})
 
         # Also populate the engine's in-memory ID order book so
         # advance_day_phase → _on_id_close() can clear against real submitted orders.

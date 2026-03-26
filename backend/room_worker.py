@@ -95,7 +95,7 @@ class RoomWorker:
         if cold_start:
             try:
                 event_rows = await db.query(
-                    "SELECT sequence, event_type, data FROM event_log "
+                    "SELECT sequence, occurred_at, event_type, data FROM event_log "
                     "WHERE room_id = $1 ORDER BY sequence ASC",
                     room_id,
                 )
@@ -103,6 +103,7 @@ class RoomWorker:
                     events = [
                         {
                             "sequence": r["sequence"],
+                            "occurred_at": r.get("occurred_at"),
                             "event_type": r["event_type"],
                             "data": (
                                 r["data"]
@@ -252,7 +253,8 @@ class RoomWorker:
                     game_loop.submit_id_orders(room_id, pid, orders)
 
             result = game_loop.advance_day_phase(room_id)
-            now_ts = int(datetime.now().timestamp() * 1000)
+            rs = game_loop._get_room(room_id)
+            now_ts = int(rs.get("phaseStartTs") or int(datetime.now().timestamp() * 1000))
 
             # Flush event log (fire-and-forget)
             pending = list(rs.get("_pendingEvents", []))
@@ -803,13 +805,16 @@ class RoomWorker:
         for pid, s in settlements.items():
             await db.execute(
                 """UPDATE players
-                   SET cash = $1, role_score = $2, system_score = $3, overall_score = $4,
+                   SET cash = $1,
+                       role_score = COALESCE($2, role_score),
+                       system_score = COALESCE($3, system_score),
+                       overall_score = COALESCE($4, overall_score),
                        updated_at = CURRENT_TIMESTAMP
                    WHERE player_id = $5 AND room_id = $6""",
                 s.get("cash", 0),
-                s.get("roleScore", 0),
-                s.get("systemScore", 0),
-                s.get("overallScore", 0),
+                s.get("roleScore"),
+                s.get("systemScore"),
+                s.get("overallScore"),
                 pid,
                 room_id,
             )

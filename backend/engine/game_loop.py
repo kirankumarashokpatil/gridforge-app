@@ -211,6 +211,60 @@ def _emit(rs: dict, event_type: str, data: dict) -> None:
     })
 
 
+def _build_replay_state(rs: dict) -> dict:
+    """Capture minimal authoritative state needed for cold-start replay."""
+    return {
+        "positions": {
+            pid: {int(sp): float(mw) for sp, mw in sps.items()}
+            for pid, sps in rs.get("positions", {}).items()
+            if isinstance(sps, dict)
+        },
+        "playerStates": {
+            pid: {
+                "cash": float(ps.get("cash", 0)),
+                "daCash": float(ps.get("daCash", 0)),
+            }
+            for pid, ps in rs.get("playerStates", {}).items()
+            if isinstance(ps, dict)
+        },
+    }
+
+
+def _hydrate_replay_state(rs: dict, replay_state: dict) -> None:
+    """Restore positions/cash snapshot from a persisted replay payload."""
+    positions = replay_state.get("positions") if isinstance(replay_state, dict) else None
+    if isinstance(positions, dict):
+        for pid, sps in positions.items():
+            if not isinstance(sps, dict):
+                continue
+            rs["positions"][pid] = {int(sp): float(mw) for sp, mw in sps.items()}
+
+    players = replay_state.get("playerStates") if isinstance(replay_state, dict) else None
+    if isinstance(players, dict):
+        for pid, vals in players.items():
+            if not isinstance(vals, dict):
+                continue
+            ps = rs["playerStates"].get(pid)
+            if not ps:
+                continue
+            if "cash" in vals:
+                ps["cash"] = float(vals["cash"])
+            if "daCash" in vals:
+                ps["daCash"] = float(vals["daCash"])
+
+
+def _event_ts_ms(event: dict) -> int | None:
+    """Best-effort conversion of event timestamp to epoch-ms."""
+    ts = event.get("occurred_at")
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    if hasattr(ts, "timestamp"):
+        return int(ts.timestamp() * 1000)
+    return None
+
+
 def _snapshot(rs: dict) -> dict:
     """Deep-copy room state to support the immutable state machine (Phase 2).
 
@@ -727,7 +781,17 @@ def _on_da_close_all(rs: dict) -> dict:
         rs["daResults"] = all_results
         avg_cp = round(sum(v["cp"] for v in all_results.values()) / len(all_results), 2) if all_results else None
         total_vol = sum(v["volume"] for v in all_results.values())
-        _emit(rs, "DA_CLEARED", {"spsCleared": len(all_results), "avgClearingPrice": avg_cp, "totalVolumeMW": total_vol, "method": "curves"})
+        _emit(
+            rs,
+            "DA_CLEARED",
+            {
+                "spsCleared": len(all_results),
+                "avgClearingPrice": avg_cp,
+                "totalVolumeMW": total_vol,
+                "method": "curves",
+                "replayState": _build_replay_state(rs),
+            },
+        )
         return {
             "daResults": all_results,
             "spsCleared": len(all_results),
@@ -755,7 +819,17 @@ def _on_da_close_all(rs: dict) -> dict:
     rs["daResults"] = all_results
     avg_cp = round(sum(v["cp"] for v in all_results.values()) / len(all_results), 2) if all_results else None
     total_vol = sum(v["volume"] for v in all_results.values())
-    _emit(rs, "DA_CLEARED", {"spsCleared": len(all_results), "avgClearingPrice": avg_cp, "totalVolumeMW": total_vol, "method": "simple"})
+    _emit(
+        rs,
+        "DA_CLEARED",
+        {
+            "spsCleared": len(all_results),
+            "avgClearingPrice": avg_cp,
+            "totalVolumeMW": total_vol,
+            "method": "simple",
+            "replayState": _build_replay_state(rs),
+        },
+    )
 
     return {"daResults": all_results, "spsCleared": len(all_results)}
 
@@ -834,7 +908,18 @@ def _on_ida_close_all(rs: dict, ida_round: str) -> dict:
         rs[result_key] = all_results
         avg_cp = round(sum(v["cp"] for v in all_results.values()) / len(all_results), 2) if all_results else None
         total_vol = sum(v["volume"] for v in all_results.values())
-        _emit(rs, "IDA_CLEARED", {"round": ida_round, "spsCleared": len(all_results), "avgClearingPrice": avg_cp, "totalVolumeMW": total_vol, "method": "curves"})
+        _emit(
+            rs,
+            "IDA_CLEARED",
+            {
+                "round": ida_round,
+                "spsCleared": len(all_results),
+                "avgClearingPrice": avg_cp,
+                "totalVolumeMW": total_vol,
+                "method": "curves",
+                "replayState": _build_replay_state(rs),
+            },
+        )
         return {
             f"{ida_round.lower()}Results": all_results,
             "acceptedBlocks": curve_result.get("acceptedBlocks", []),
@@ -876,7 +961,18 @@ def _on_ida_close_all(rs: dict, ida_round: str) -> dict:
     rs[result_key] = all_results
     avg_cp = round(sum(v["cp"] for v in all_results.values()) / len(all_results), 2) if all_results else None
     total_vol = sum(v["volume"] for v in all_results.values())
-    _emit(rs, "IDA_CLEARED", {"round": ida_round, "spsCleared": len(all_results), "avgClearingPrice": avg_cp, "totalVolumeMW": total_vol, "method": "simple"})
+    _emit(
+        rs,
+        "IDA_CLEARED",
+        {
+            "round": ida_round,
+            "spsCleared": len(all_results),
+            "avgClearingPrice": avg_cp,
+            "totalVolumeMW": total_vol,
+            "method": "simple",
+            "replayState": _build_replay_state(rs),
+        },
+    )
     return {f"{ida_round.lower()}Results": all_results}
 
 
@@ -920,12 +1016,6 @@ def _on_id_close(rs: dict) -> dict:
         pid: dict(sps) for pid, sps in rs["positions"].items()
     }
 
-    _emit(rs, "ID_CLOSED", {
-        "tradesMatched": len(id_result.get("trades", [])),
-        "totalVolumeMW": id_result.get("totalVolume", 0),
-        "positionsFrozen": True,
-    })
-
     # Build per-player trade summary so the client can apply toasts + position updates
     # from the server result without performing its own matching.
     player_id_summaries: dict[str, dict] = {}
@@ -947,6 +1037,16 @@ def _on_id_close(rs: dict) -> dict:
             "side": side,
             "positionDeltas": pid_deltas,
         }
+
+    _emit(rs, "ID_CLOSED", {
+        "tradesMatched": len(id_result.get("trades", [])),
+        "totalVolumeMW": id_result.get("totalVolume", 0),
+        "positionsFrozen": True,
+        "positionDeltas": id_result.get("positionDeltas", {}),
+        "cashDeltas": id_result.get("cashDeltas", {}),
+        "playerIdSummaries": player_id_summaries,
+        "replayState": _build_replay_state(rs),
+    })
 
     return {
         "idTradesMatched": len(id_result.get("trades", [])),
@@ -1456,34 +1556,64 @@ def replay_from_events(
     for ev in sorted(events, key=lambda e: e.get("sequence", 0)):
         et = ev["event_type"]
         data = ev.get("data", {})
+        event_ts = _event_ts_ms(ev)
+
+        def _mark_phase_start() -> None:
+            if event_ts is not None:
+                rs["phaseStartTs"] = event_ts
 
         if et == "FORECAST_GENERATED":
             # Re-run deterministically: same scenarioId + seed → identical markets
             phase = data.get("phase", "FORECAST_0")
             _on_forecast(rs, phase)
             rs["dayPhase"] = "DA"  # next expected phase after FORECAST_0
+            _mark_phase_start()
 
         elif et == "FORECAST_REFINED":
             phase = data.get("phase", "FORECAST_1")
             _on_forecast(rs, phase)
             # Phase after FORECAST_1 is IDA1; after FORECAST_2 is IDA2
             rs["dayPhase"] = {"FORECAST_1": "IDA1", "FORECAST_2": "IDA2"}.get(phase, "IDA1")
+            _mark_phase_start()
 
         elif et == "DA_CLEARED":
-            # Positions and cash already restored via DB player records.
-            # Mark that DA has been cleared.
+            replay_state = data.get("replayState")
+            if replay_state:
+                _hydrate_replay_state(rs, replay_state)
             rs["dayPhase"] = "FORECAST_1"
+            _mark_phase_start()
 
         elif et == "IDA_CLEARED":
+            replay_state = data.get("replayState")
+            if replay_state:
+                _hydrate_replay_state(rs, replay_state)
             ida_round = data.get("round", "IDA1")
             rs["dayPhase"] = "FORECAST_2" if ida_round == "IDA1" else "ID_ROUNDS"
+            _mark_phase_start()
 
         elif et == "ID_CLOSED":
+            replay_state = data.get("replayState")
+            if replay_state:
+                _hydrate_replay_state(rs, replay_state)
+            else:
+                # Backward-compatible fallback for older sparse events.
+                for pid, sp_deltas in data.get("positionDeltas", {}).items():
+                    if not isinstance(sp_deltas, dict):
+                        continue
+                    for sp, delta in sp_deltas.items():
+                        rs["positions"].setdefault(pid, {})[int(sp)] = (
+                            rs["positions"].get(pid, {}).get(int(sp), 0) + float(delta)
+                        )
+                for pid, cash_delta in data.get("cashDeltas", {}).items():
+                    ps = rs["playerStates"].get(pid)
+                    if ps:
+                        ps["cash"] = ps.get("cash", 0) + float(cash_delta)
             rs["dayPhase"] = "REALTIME"
             rs["currentSp"] = 1
             rs["bmSubPhase"] = "BM_OPEN"
             _recompute_niv_for_sp(rs, 1)
-            # Freeze positions (we have nothing in order books, so use DB positions)
+            _mark_phase_start()
+            # Freeze replayed positions for BM.
             rs["frozenPositions"] = {
                 pid: dict(sps) for pid, sps in rs["positions"].items()
             }
@@ -1504,6 +1634,7 @@ def replay_from_events(
                     ps["soc"] = s["soc"]
             # Store settlement data
             rs["spSettlements"][sp] = data.get("playerSettlements", {})
+            _mark_phase_start()
 
         elif et == "DAY_FINALIZED":
             rs["dayPhase"] = "RESULTS"
@@ -1515,6 +1646,7 @@ def replay_from_events(
                     for key in ("roleScore", "systemScore", "overallScore", "cash"):
                         if key in s:
                             ps[key] = s[key]
+            _mark_phase_start()
 
         # Track event sequence watermark
         rs["_eventSeq"] = max(rs.get("_eventSeq", 0), ev.get("sequence", 0))

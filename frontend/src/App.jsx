@@ -395,10 +395,21 @@ export default function App() {
 
     // Listen for published settlement contracts (Elexon sync)
     const unsubSpContracts = subscribe(`room:${room}:sp_contracts`, (data) => {
-      if (data && Array.isArray(data)) {
+      if (!data) return;
+      if (Array.isArray(data)) {
         data.forEach(record => {
+          if (record?.sp == null || !record?.contracts) return;
           setSpContracts(prev => ({ ...prev, [record.sp]: record.contracts }));
         });
+        return;
+      }
+      if (typeof data === 'object') {
+        if (data.sp != null && data.contracts) {
+          setSpContracts(prev => ({ ...prev, [data.sp]: data.contracts }));
+          return;
+        }
+        // Fallback for map-shaped payloads keyed by SP.
+        setSpContracts(prev => ({ ...prev, ...data }));
       }
     });
 
@@ -691,30 +702,50 @@ export default function App() {
     // Subscribe to BM order book
     const unsubBm = subscribe(`room:${room}:bm:${spForBooks}`, (data) => {
       if (data && typeof data === 'object') {
-        setOrderBook(prev => ({ ...prev, ...data }));
+        const pid = data.id || data.player_id;
+        if (pid) {
+          setOrderBook(prev => ({ ...prev, [pid]: data }));
+        } else {
+          setOrderBook(prev => ({ ...prev, ...data }));
+        }
       }
     });
     
     // Subscribe to DA order book
     const unsubDa = subscribe(`room:${room}:da:${daCycle}`, (data) => {
       if (data && typeof data === 'object') {
-        setDaOrderBook(prev => ({ ...prev, ...data }));
+        const pid = data.id || data.player_id;
+        if (pid) {
+          setDaOrderBook(prev => ({ ...prev, [pid]: data }));
+        } else {
+          setDaOrderBook(prev => ({ ...prev, ...data }));
+        }
       }
     });
     
     // Subscribe to ID order book
     const unsubId = subscribe(`room:${room}:id:${spForBooks}`, (data) => {
       if (data && typeof data === 'object') {
-        setIdOrderBook(prev => ({ ...prev, ...data }));
+        const pid = data.id || data.player_id;
+        if (pid) {
+          setIdOrderBook(prev => ({ ...prev, [pid]: data }));
+        } else {
+          setIdOrderBook(prev => ({ ...prev, ...data }));
+        }
       }
     });
     
     // Subscribe to DA curve submissions
     const unsubDaCurves = subscribe(`room:${room}:da_curves`, (data) => {
       if (data && typeof data === 'object') {
+        const pid = data.player_id || data.id;
+        if (pid && data.segments) {
+          setDaCurves(prev => ({ ...prev, [pid]: { ...data, playerId: pid } }));
+          return;
+        }
         Object.entries(data).forEach(([id, curve]) => {
           if (curve && curve.segments) {
-            setDaCurves(prev => ({ ...prev, [id]: { segments: curve.segments, playerId: id } }));
+            setDaCurves(prev => ({ ...prev, [id]: { ...curve, playerId: id } }));
           }
         });
       }

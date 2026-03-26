@@ -173,16 +173,11 @@ export function useApi() {
     putDaBid: (roomId, cycle, playerId, bid) => api('POST', `/api/rooms/${roomId}/da/${cycle}/${playerId}`, bid),
     
     // DA curves
-    getDaCurves: (roomId) => api('GET', `/api/rooms/${roomId}/da_curves`),
     putDaCurve: (roomId, playerId, curve) => api('POST', `/api/rooms/${roomId}/da_curves/${playerId}`, curve),
     
     // ID bids
     getIdBids: (roomId, sp) => api('GET', `/api/rooms/${roomId}/id/${sp}`),
     putIdBid: (roomId, sp, playerId, bid) => api('POST', `/api/rooms/${roomId}/id/${sp}/${playerId}`, bid),
-    
-    // Contracts
-    getContracts: (roomId, sp) => api('GET', `/api/rooms/${roomId}/contracts/${sp}`),
-    putContracts: (roomId, sp, data) => api('POST', `/api/rooms/${roomId}/contracts/${sp}`, data),
     
     // Instructor events
     triggerEvent: (roomId, eventId) => api('POST', `/api/rooms/${roomId}/events`, { eventId, ts: Date.now() }),
