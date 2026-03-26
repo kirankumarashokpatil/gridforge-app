@@ -156,64 +156,40 @@ export default function WaitingRoom({
         return () => clearInterval(interval);
     }, [api, room, setPlayers]);
 
+    // Bug 4: consolidated single NESO election effect — replaces three competing effects
+    // that caused redundant API calls and brief role-state oscillation.
     useEffect(() => {
         if (!pid) return;
         const normalizedPlayers = Object.values(players)
             .filter(Boolean)
             .map(player => normalizePlayer(player, player));
 
-        // Trust backend authority first: if DB says I'm NESO, do not let
-        // local host election immediately flip me back to non-host.
         const myDbRole = normalizedPlayers.find(p => p.id === pid)?.role;
-        if (myDbRole === "NESO") {
-            if (!isHost) setIsHost(true);
-            return;
-        }
-
         const hostId = getAuthoritativeHostId(normalizedPlayers);
         const shouldBeHost = hostId === pid;
-        if (shouldBeHost !== isHost) {
-            setIsHost(shouldBeHost);
-        }
 
-        // Self-heal host assignment: if this client is authoritative host but
-        // backend role has drifted/raced, force it back to NESO.
-        if (shouldBeHost && api && room) {
-            if (myDbRole !== "NESO") {
-                setRole("NESO");
+        // 1. Sync isHost state
+        if (shouldBeHost !== isHost) setIsHost(shouldBeHost);
+
+        // 2. If we are the authoritative host, ensure NESO role is set locally and in DB
+        if (shouldBeHost) {
+            if (role !== "NESO") setRole("NESO");
+            // Only write to DB if the role hasn't been confirmed there yet
+            if (myDbRole !== "NESO" && api && room) {
                 api.putPlayer(room, pid, {
                     role: "NESO",
                     preferredRole: "NESO",
                     status: "ASSIGNED",
                     ready: true,
                     lastSeen: Date.now(),
-                }).catch(err => console.error('[WaitingRoom] Host NESO self-heal failed:', err));
+                }).catch(err => console.error('[WaitingRoom] NESO write failed:', err));
             }
+            return;
         }
-    }, [players, pid, isHost, setIsHost]);
 
-
-    useEffect(() => {
-        const dbRole = players[pid]?.role;
-        if (dbRole && dbRole !== role) {
-            setRole(dbRole);
-        }
-    }, [players, pid, role, setRole]);
-
-    // When confirmed as host, set NESO role
-    useEffect(() => {
-        if (!api || !room || !pid || !isHost) return;
-        // Avoid duplicate concurrent writes when the role is already confirmed.
-        if (players?.[pid]?.role === "NESO") return;
-        setRole("NESO");
-        api.putPlayer(room, pid, {
-            role: "NESO",
-            preferredRole: "NESO",
-            status: "ASSIGNED",
-            ready: true,
-            lastSeen: Date.now(),
-        });
-    }, [api, room, pid, isHost, setRole, players]);
+        // 3. Non-host: sync role from DB if it differs from local state
+        if (myDbRole && myDbRole !== role) setRole(myDbRole);
+    }, [players, pid, isHost, role, api, room, setIsHost, setRole]);
 
     const copyRoom = () => {
         navigator.clipboard?.writeText(room);
@@ -238,12 +214,15 @@ export default function WaitingRoom({
         // sp is kept at 0 here — the server engine uses 0 as sentinel for non-REALTIME.
         // Sending sp:1 conflicts with the engine's currentSp=0 and causes the DB to be
         // out of sync. The engine will set sp=1 when REALTIME begins.
+        // Bug 6: also broadcast gameMode and advanceMode so all clients start in sync.
         api.updateRoom(room, {
             roomState: ROOM_STATES.RUNNING,
             phase: "FORECAST_0",
             phaseStartTs: now,
             scenarioId,
             paused: false,
+            gameMode,
+            advanceMode: "AUTO",
         });
     };
 
@@ -254,9 +233,13 @@ export default function WaitingRoom({
         return () => clearInterval(interval);
     }, []);
 
-    const activePlayers = Object.values(players).filter(
-        p => p && p.name && now - (p.lastSeen || p.last_seen || 0) < 120000 // Increased from 60s to 120s
-    );
+    // Bug 7: treat lastSeen=0 as active (player just registered, heartbeat hasn't fired yet)
+    const activePlayers = Object.values(players).filter(p => {
+        if (!p || !p.name) return false;
+        const ls = p.lastSeen || p.last_seen || 0;
+        if (ls === 0) return true; // freshly joined, no heartbeat yet
+        return now - ls < 120000;
+    });
     const hasActiveNeso = activePlayers.some(p => p.role === "NESO");
 
     const roleOptions = Object.values(ROLES).filter(r => !r.isSystem && r.id !== "INSTRUCTOR");

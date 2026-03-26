@@ -121,8 +121,8 @@ async def update_room_meta(room_id: str, data: Dict[str, Any]):
             sql = f"UPDATE rooms SET {', '.join(updates)} WHERE room_id = ${idx}"
             await db.execute(sql, *values)
 
-        # Sync config to in-memory game state (paused, advanceMode, simSpeed, tickSpeed)
-        config_keys = {"paused", "tickSpeed", "advanceMode", "simSpeedId", "simSpeedFactor"}
+        # Sync config to in-memory game state (paused, advanceMode, simSpeed, tickSpeed, gameMode)
+        config_keys = {"paused", "tickSpeed", "advanceMode", "simSpeedId", "simSpeedFactor", "gameMode"}
         game_config = {k: v for k, v in data.items() if k in config_keys}
         if game_config:
             game_loop.set_room_config(room_id, game_config)

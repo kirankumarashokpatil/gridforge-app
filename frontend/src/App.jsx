@@ -157,6 +157,8 @@ export default function App() {
 
   const refs = useRef({}); refs.current = { sp, phase, bmSubPhase, day, phaseStartTs, soc, cash, daCash, submitted, pid, name, room, asset, assetConfig, isInstructor, scenarioId: roomScenario, gameMode, role, contractPosition, positions, contracts, daPositions, orderBookSnap: orderBook, daOrderBookSnap: daOrderBook, idOrderBookSnap: idOrderBook, spContracts, players, physicalState, msLeft, tickSpeed, paused, advanceMode, daCurves, publishedForecast };
   const prevPhaseRef = useRef({ phase: "INIT", sp: 0, bmSubPhase: null });
+  // Bug 8: guard against double-fire in StrictMode or fast re-renders
+  const gameInitFiredRef = useRef(false);
   const lastEventRef = useRef(null);
   const advanceInFlightRef = useRef(false);
   // Holds the authoritative DA results from the most-recent server broadcast.
@@ -330,6 +332,8 @@ export default function App() {
       if (data?.paused !== undefined) setPaused(data.paused);
       if (data?.advanceMode) setAdvanceMode(data.advanceMode);
       if (data?.simSpeedId) setSimSpeedId(data.simSpeedId);
+      // Bug 6: sync gameMode broadcast from NESO at game start
+      if (data?.gameMode) setGameMode(data.gameMode);
       // Forecast update bulletin produced by FORECAST_* phase advance
       if (data?.forecastUpdateSummary) setForecastUpdateSummary(data.forecastUpdateSummary);
       if (data?.publishedForecast) setPublishedForecast(data.publishedForecast);
@@ -495,9 +499,21 @@ export default function App() {
     };
   }, [screen, room, api, subscribe]);
 
+  // Bug 8: reset gameInitFiredRef whenever the player is back at lobby or waiting room
+  // so a second game_init entry (different session) works correctly.
+  useEffect(() => {
+    if (screen === 'waiting_room' || screen === 'lobby') {
+      gameInitFiredRef.current = false;
+    }
+  }, [screen]);
+
   // ─── GAME INIT FROM WAITING ROOM (all roles) ───
   useEffect(() => {
     if (screen !== "game_init") return;
+    // Bug 8: guard against double-fire (StrictMode double-invoke or fast re-renders)
+    if (gameInitFiredRef.current) return;
+    gameInitFiredRef.current = true;
+
     const initGame = async () => {
       const id = pid || getOrCreatePlayerId();
       setPid(id);
@@ -510,11 +526,29 @@ export default function App() {
       const myPlayerRecord = refs.current.players?.[id];
       const assignedAsset = myPlayerRecord?.assignedAssetKey || myPlayerRecord?.asset || null;
 
+      // Bug 3: guard — if this role requires an asset but none was assigned by NESO,
+      // send the player back to the waiting room instead of silently joining with no asset.
+      if (needsAsset && !assignedAsset) {
+        console.warn('[game_init] Asset role without assigned asset — returning to waiting_room');
+        gameInitFiredRef.current = false;
+        setScreen('waiting_room');
+        return;
+      }
+
+      // Bug 2: detect rejoin so we don't zero-out accumulated cash/SoC
+      const existingCash = myPlayerRecord?.cash ?? null;
+      const isRejoin = existingCash !== null && existingCash !== 0;
+
+      let resolvedAsset = 'NONE';
+      let resolvedSoc = 100;
+
       if (needsAsset && assignedAsset) {
         // Asset-owning roles: initialize asset, SoC, physical state
         const customConfig = myPlayerRecord?.custom_config || null;
         const def = { ...ASSETS[assignedAsset], ...(customConfig || {}) };
-        const soc0 = initSoF(def);
+        const soc0 = isRejoin ? (myPlayerRecord?.sof ?? initSoF(def)) : initSoF(def);
+        resolvedAsset = assignedAsset;
+        resolvedSoc = soc0;
         setAsset(assignedAsset);
         setAssetConfig(customConfig);
         setSoc(soc0);
@@ -528,33 +562,54 @@ export default function App() {
           pendingReboundMwh: 0,
         });
         if (api && room) {
-          await api.putPlayer(room, id, {
+          // Bug 2: only write cash/soc on fresh join; preserve existing values on rejoin
+          const putPayload = {
             name: name.trim(),
             asset: assignedAsset,
             custom_config: customConfig,
-            cash: 0,
-            da_cash: 0,
-            sof: soc0,
             role: currentRole,
             status: 'ACTIVE',
-          }).catch(err => console.error('[game_init] putPlayer failed:', err));
+          };
+          if (!isRejoin) {
+            putPayload.cash = 0;
+            putPayload.da_cash = 0;
+            putPayload.sof = soc0;
+          }
+          await api.putPlayer(room, id, putPayload)
+            .catch(err => console.error('[game_init] putPlayer failed:', err));
         }
       } else {
-        // Non-asset roles
+        // Non-asset roles (NESO, ELEXON, TRADER, SUPPLIER)
         setAsset("NONE");
         setSoc(100);
-        if (currentRole === "TRADER") setCash(5000);
+        if (currentRole === "TRADER" && !isRejoin) setCash(5000);
         if (api && room) {
-          await api.putPlayer(room, id, {
+          const putPayload = {
             name: name.trim(),
             asset: "NONE",
-            cash: currentRole === "TRADER" ? 5000 : 0,
-            da_cash: 0,
-            sof: 100,
             role: currentRole,
             status: 'ACTIVE',
-          }).catch(err => console.error('[game_init] putPlayer failed:', err));
+          };
+          if (!isRejoin) {
+            putPayload.cash = currentRole === "TRADER" ? 5000 : 0;
+            putPayload.da_cash = 0;
+            putPayload.sof = 100;
+          }
+          await api.putPlayer(room, id, putPayload)
+            .catch(err => console.error('[game_init] putPlayer failed:', err));
         }
+      }
+
+      // Bug 1+5: Register this player in the engine's in-memory playerStates so
+      // BM settlements, cash updates and SoC changes are applied correctly.
+      if (api && room) {
+        await api.engineRegister(room, {
+          playerId: id,
+          name: name.trim(),
+          role: currentRole,
+          asset: resolvedAsset,
+          sof: resolvedSoc,
+        }).catch(err => console.warn('[game_init] engineRegister failed (non-fatal):', err));
       }
 
       // Fetch authoritative state from server engine
