@@ -111,6 +111,79 @@ def _check_avail_mw(room_id: str, player_id: str, mw: float) -> None:
         pass  # non-fatal — fall back to global MAX_MW cap
 
 
+def _check_bm_physical_constraints(room_id: str, player_id: str, bid: dict) -> None:
+    """
+    Server-side enforcement of ramp rate and minimum stable generation for BM bids.
+
+    Ramp rate  — the BM bid proposes a new total output of (contract + delta).
+                 That total must not deviate from the previous SP's actualPhysical
+                 by more than the asset's rampRate (MW per SP).
+
+    MinMw      — fuel generators cannot run in the illegal band (0, minMw).
+                 A bid that would result in total output > 0 but < minMw is
+                 rejected; the player must bid at least minMw or not at all.
+    """
+    try:
+        rs = game_loop._get_room(room_id)
+        ps = rs.get("playerStates", {}).get(player_id)
+        if not ps:
+            return
+        asset_key = ps.get("asset", "")
+        asset_def = ASSETS.get(asset_key)
+        if not asset_def:
+            return
+
+        bid_mw = float(bid.get("mw", 0))
+        bid_side = bid.get("side", "offer")
+        sp = rs.get("currentSp", 0)
+
+        # Contracted position for this SP (DA + IDA + ID, already accumulated).
+        contract_mw = float(rs.get("positions", {}).get(player_id, {}).get(sp, 0))
+
+        # Proposed total physical output if BM dispatches this bid.
+        # Offer (short system) → adds to contract; bid (long system) → subtracts.
+        if bid_side in ("offer", "sell"):
+            proposed_total = contract_mw + bid_mw
+        else:
+            proposed_total = contract_mw - bid_mw
+
+        # ── Ramp rate ─────────────────────────────────────────────────────────
+        ramp_rate = asset_def.get("rampRate", 0)
+        if ramp_rate and ramp_rate > 0:
+            sp_history = ps.get("spHistory", [])
+            if sp_history:
+                prev_actual = float(sp_history[-1].get("actualPhysical", 0))
+                ramp_needed = abs(proposed_total - prev_actual)
+                if ramp_needed > ramp_rate * 1.1:   # 10 % tolerance for rounding
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"Ramp constraint violated: proposed output {proposed_total:.0f} MW "
+                            f"vs previous SP {prev_actual:.0f} MW requires "
+                            f"{ramp_needed:.0f} MW ramp (limit {ramp_rate:.0f} MW/SP)."
+                        ),
+                    )
+
+        # ── Minimum stable generation ─────────────────────────────────────────
+        min_mw = asset_def.get("minMw", 0)
+        if min_mw > 0 and asset_def.get("kind") == "fuel":
+            # Illegal operating band: 0 < proposed_total < minMw
+            if 0 < proposed_total < min_mw:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Bid would result in {proposed_total:.0f} MW total output, "
+                        f"below minimum stable generation of {min_mw:.0f} MW. "
+                        f"Bid at least {min_mw:.0f} MW or reduce to 0."
+                    ),
+                )
+
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # non-fatal — never block a bid on unexpected errors
+
+
 async def _verify_player_in_room(room_id: str, player_id: str) -> None:
     """Raise HTTPException if player doesn't exist in the specified room."""
     rows = await db.query(
@@ -178,6 +251,7 @@ async def put_bm_bid(room_id: str, sp: int, player_id: str, bid: Dict[str, Any])
     _check_gate_open(room_id, "bm")
     _check_rate_limit(room_id, player_id)
     _check_avail_mw(room_id, player_id, bid.get("mw", 0))
+    _check_bm_physical_constraints(room_id, player_id, bid)
     await _verify_player_in_room(room_id, player_id)
     try:
         await db.execute(

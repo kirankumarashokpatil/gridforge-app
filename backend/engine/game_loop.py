@@ -1281,6 +1281,8 @@ def _settle_sp(rs: dict, sp: int) -> dict:
             "ida2Rev": ida2_rev,
             "idRev": 0,
             "contractPosMw": contract_pos_mw,
+            "bmAccMw": bm_acc_mw,
+            "actualPhysical": actual_physical,
             "accepted": bm_acc_mw != 0,
             "isShort": actual.get("isShort", False),
             "niv": system_niv,

@@ -1417,10 +1417,18 @@ export default function App() {
     if (!isTraderRole && +myBid.mw > avail + 0.5) { alert(`⚠ Max available: ${f0(avail)} MW`); return; }
 
     const bid = { id, name: n, asset: ak, mw: +myBid.mw, price: +myBid.price, side: bidSide, col: def.col, isBot: false };
-    api.putBmBid(rm, t, id, bid);
     setSubmitted(true); setOrderBook(p => ({ ...p, [id]: bid }));
-    signalReady();
-    addToast({ emoji: "📤", title: "BM bid submitted", body: `${f0(myBid.mw)}MW @ £${myBid.price}/MWh`, col: "#38c0fc" });
+    api.putBmBid(rm, t, id, bid)
+      .then(() => {
+        signalReady();
+        addToast({ emoji: "📤", title: "BM bid submitted", body: `${f0(myBid.mw)}MW @ £${myBid.price}/MWh`, col: "#38c0fc" });
+      })
+      .catch(err => {
+        setSubmitted(false);
+        setOrderBook(p => { const n2 = { ...p }; delete n2[id]; return n2; });
+        const detail = err?.message?.replace(/^API error: \d+ /, "") || "Bid rejected by server";
+        addToast({ emoji: "⚠️", title: "BM Bid Rejected", body: detail, col: "#f0455a" });
+      });
   }, [myBid, api, addToast, publishedForecast]);
 
   const submitDaBid = useCallback(() => {
