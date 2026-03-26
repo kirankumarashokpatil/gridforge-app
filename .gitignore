@@ -27,3 +27,18 @@ dist-ssr
 __pycache__/
 *.pyc
 .venv/
+
+# GunDB Data
+radata/
+
+# Local Config & Cache
+.config/
+.local/
+
+# Logs and debug artifacts
+*.log
+eslint_errors.json
+debug*.png
+sync_fail_*.png
+out*.txt
+vite_*.txt
