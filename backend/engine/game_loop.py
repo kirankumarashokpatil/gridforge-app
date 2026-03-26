@@ -1193,17 +1193,36 @@ def _settle_sp(rs: dict, sp: int) -> dict:
 
         # Actual physical = contracted + BM adjustment
         actual_physical = contract_pos_mw + bm_acc_mw
+        asset_def = ASSETS.get(asset_key, {})
         if asset_key in (actual.get("trippedAssets") or []):
             actual_physical = 0
 
-        # Compute deviation
+        # Update SoC/fuel for contracted physical delivery.
+        # _on_bm_close_sp already called update_sof for bm_acc_mw; here we account
+        # for the contracted position that is physically delivered every SP regardless
+        # of BM.  Positive contract = discharge/generate (is_short=True consumes
+        # fuel/SoC); negative = charge/consume (is_short=False restores SoC).
+        if abs(contract_pos_mw) > 0.01:
+            contract_is_discharge = contract_pos_mw > 0
+            ps["soc"] = update_sof(
+                asset_def, ps.get("soc", init_sof(asset_def)),
+                abs(contract_pos_mw), contract_is_discharge,
+            )
+
+        # Compute deviation.
+        # For non-suppliers: deviation = actual_physical − (contract + bm).
+        # By construction actual_physical = contract + bm (unless tripped), so
+        # deviation is zero for normal delivery and negative when an asset trips.
+        # Previously this was (actual_physical − contract) which included bm_acc_mw
+        # in the deviation, causing BM-dispatched assets to earn imbalance income on
+        # top of their BM revenue (double-payment).
         if role == "SUPPLIER":
             base_load = ps.get("baseLoadMw", 80)
             customer_demand = supplier_demand_mw(sp, base_load)
             deviation = contract_pos_mw - customer_demand
             ps["customerDemandMw"] = customer_demand
         else:
-            deviation = actual_physical - contract_pos_mw
+            deviation = actual_physical - (contract_pos_mw + bm_acc_mw)
 
         # Cashout pricing: single (post-P305) or dual (pre-2015)
         if cashout == "single":
@@ -1217,7 +1236,6 @@ def _settle_sp(rs: dict, sp: int) -> dict:
             )
 
         # Operating cost (fuel/wear)
-        asset_def = ASSETS.get(asset_key, {})
         var_cost = asset_def.get("varCost", 0) or asset_def.get("wear", 0)
         operating_cost = -(abs(actual_physical) * var_cost * SP_DURATION_H)
 
@@ -1286,6 +1304,23 @@ def _settle_sp(rs: dict, sp: int) -> dict:
             "actualPhysical": actual_physical,
             "physicalStatus": ps.get("physicalStatus", "ONLINE"),
         }
+
+    # System-level energy conservation check (soft — logs warning, never crashes).
+    # Per the conservation law: sum of non-supplier deviations should ≈ system NIV.
+    # With the corrected deviation formula (actual_physical − contract − bm = 0 for normal
+    # delivery), deviations are non-zero only for tripped assets.  The residual NIV not
+    # explained by player deviations represents background noise/bot activity.
+    gen_deviation_sum = sum(
+        s.get("deviation", 0)
+        for pid, s in settlements.items()
+        if rs["playerStates"].get(pid, {}).get("role") != "SUPPLIER"
+    )
+    if abs(gen_deviation_sum - system_niv) > 500:
+        import logging
+        logging.getLogger("gridforge").warning(
+            "SP %s conservation mismatch: gen_dev_sum=%.1f system_niv=%.1f diff=%.1f",
+            sp, gen_deviation_sum, system_niv, gen_deviation_sum - system_niv,
+        )
 
     # BSUoS socialization: spread total imbalance cost across all players
     total_imb_cost = sum(

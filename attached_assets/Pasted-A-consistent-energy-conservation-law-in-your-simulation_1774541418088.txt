@@ -1,0 +1,121 @@
+A consistent **energy conservation law** in your simulation can be expressed as:
+
+> **For every SP and every player, the net physical energy change of each asset must equal the sum of all market‑side energy commitments plus explicit losses.** [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/12147057/84c826e0-4f50-40e7-9f98-8e0d1d7b7f49/paste.txt)
+
+In practice for GridForge, implement it as these concrete rules.
+
+## Core conservation equation (per SP, per player)
+
+For any asset (battery, generator, supplier, etc.) in Settlement Period \(sp\):
+
+\[
+E_{\text{asset}}(sp) = E_{\text{DA}}(sp) + E_{\text{IDA1}}(sp) + E_{\text{IDA2}}(sp) + E_{\text{ID}}(sp) + E_{\text{BM}}(sp) + E_{\text{loss}}(sp)
+\]
+
+Where energies are MW × SP_DURATION_H with signs:
+
+- Positive = net **export** (generation or discharge).  
+- Negative = net **import** (load or charge).
+
+No other “mystery” energy is allowed.
+
+In GridForge terms: [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/12147057/84c826e0-4f50-40e7-9f98-8e0d1d7b7f49/paste.txt)
+
+- `contractPosMw = positions[pid][sp]` (DA + IDA1 + IDA2 + ID_ROUNDS).  
+- `bmAccMw` from accepted BM bids.  
+- `actualPhysical` from `update_sof` / `supplier_demand_mw`.  
+- **Conservation constraint:**
+  ```python
+  actualPhysical == contractPosMw + bmAccMw + technical_losses
+  ```
+  within a small tolerance. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/12147057/84c826e0-4f50-40e7-9f98-8e0d1d7b7f49/paste.txt)
+
+## Market‑side rules (all roles)
+
+These must hold **for every SP** to avoid illogical behaviour across markets:
+
+1. **Position additivity**
+   ```python
+   positions[pid][sp] == da_pos + ida1_pos + ida2_pos + id_pos
+   ```
+   No overwrite, only incremental updates per phase. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/12147057/84c826e0-4f50-40e7-9f98-8e0d1d7b7f49/paste.txt)
+
+2. **No “free energy” from BM**
+   ```python
+   # BM only shifts physical vs contracted, not create energy:
+   actualPhysical = contractPosMw + bmAccMw
+   ```
+   BM cannot change `total_system_energy`, only re‑dispatch who provides it. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/12147057/84c826e0-4f50-40e7-9f98-8e0d1d7b7f49/paste.txt)
+
+3. **System‑level balance**
+   For each SP:
+   ```python
+   system_niv = actual_demand - actual_generation
+   # Must equal sum of player deviations (up to losses and rounding)
+   sum_player_deviation ≈ system_niv
+   ```
+   You already compute `system_niv` and per‑player `deviation`; enforce this consistency. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/12147057/84c826e0-4f50-40e7-9f98-8e0d1d7b7f49/paste.txt)
+
+## Asset‑level constraints
+
+### Batteries
+
+For each SP:
+
+- SoC update (already via `update_sof`): [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/12147057/84c826e0-4f50-40e7-9f98-8e0d1d7b7f49/paste.txt)
+  ```python
+  soc_next = soc_now + (charge_mw - discharge_mw) * η * SP_DURATION_H
+  ```
+- Constraints:
+  - SoC in [0, E_max].
+  - `discharge_mw` cannot exceed `(soc_now / SP_DURATION_H)` and power limit.
+  - Market energy = physical energy:
+    ```python
+    contractPosMw + bmAccMw == discharge_mw - charge_mw
+    ```
+
+### Generators
+
+- Output limited by min/max and availability:
+  ```python
+  0 ≤ actualPhysical ≤ P_max
+  if asset tripped → actualPhysical = 0
+  ```
+- Market positions + BM must match actual output:
+  ```python
+  actualPhysical == contractPosMw + bmAccMw
+  ```
+
+### Suppliers / Load
+
+- Physical demand from `supplier_demand_mw(sp, base_load)` is binding. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/12147057/84c826e0-4f50-40e7-9f98-8e0d1d7b7f49/paste.txt)
+- Market side:
+  ```python
+  # Negative positions = buying energy
+  actualDemand == -contractPosMw - bmAccMw
+  ```
+
+## How to enforce in GridForge
+
+1. **At end of each SP (`_settle_sp`) add assertions:** [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/12147057/84c826e0-4f50-40e7-9f98-8e0d1d7b7f49/paste.txt)
+   ```python
+   for pid, ps in rs["playerStates"].items():
+       asset = ps.get("asset")
+       contract = rs["positions"].get(pid, {}).get(sp, 0)
+       bm_acc = _bm_accepted_mw_for_player(rs, sp, pid)
+       physical = _actual_physical_for_player(rs, sp, pid)
+       assert abs(physical - (contract + bm_acc)) < 1e-3
+   ```
+
+2. **At system level:**
+   ```python
+   total_deviation = sum(s["deviation"] for s in settlements.values())
+   system_niv = actual.get("niv", 0)
+   assert abs(total_deviation - system_niv) < tolerance
+   ```
+
+3. **Disallow illegal orders ex‑ante:**
+   - When accepting any DA/IDA/ID/BM bid, check it’s compatible with asset constraints (`P_max`, SoC, ramp).  
+   - Reject or clip orders that would violate energy conservation.
+
+This gives you a **single conservation law**: every MW that leaves or enters an asset in REALTIME must be explained by the sum of its market positions plus defined losses, and system‑wide the sum of all deviations equals NIV. That prevents all “teleporting energy” artefacts across DA, IDA, ID, and BM. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/12147057/84c826e0-4f50-40e7-9f98-8e0d1d7b7f49/paste.txt)
