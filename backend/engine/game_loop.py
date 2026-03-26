@@ -900,23 +900,32 @@ def _on_ida_close_all(rs: dict, ida_round: str) -> dict:
             accepted_bids = []
             for pid, vols in curve_result.get("volumes", {}).items():
                 vol = vols[sp - 1]
-                if abs(vol) <= 0:
-                    continue
-                side = "offer" if vol < 0 else "bid"
-                mw_acc = abs(vol)
-                revenue = (mw_acc * cp * SP_DURATION_H) * (1 if side == "offer" else -1)
+                # `vol` is the TOTAL position from a fresh re-auction (same sign convention
+                # as DA clearing: negative = sell = generator long).  We must only credit
+                # and record the INCREMENTAL change beyond what was already contracted in
+                # the previous round (DA for IDA1, IDA1 for IDA2).  Without this, both
+                # position and revenue are double-counted every IDA round.
+                new_pos = -vol  # total MW obligation after this IDA round
+                prior_pos = rs["positions"].get(pid, {}).get(sp, 0)  # from DA (or IDA1)
+                incremental_delta = new_pos - prior_pos
+
+                if abs(incremental_delta) < 0.01:
+                    continue  # no meaningful IDA adjustment for this player/SP
+
+                side = "offer" if incremental_delta > 0 else "bid"
+                mw_inc = abs(incremental_delta)
+                revenue = (mw_inc * cp * SP_DURATION_H) * (1 if side == "offer" else -1)
                 accepted_bids.append({
                     "id": pid,
                     "player_id": pid,
                     "side": side,
-                    "mwAcc": mw_acc,
+                    "mwAcc": mw_inc,
                     "revenue": revenue,
                     "price": cp,
                 })
 
-                rs["positions"].setdefault(pid, {})[sp] = (
-                    rs["positions"].get(pid, {}).get(sp, 0) - vol
-                )
+                # Replace (not accumulate) — new_pos is already the correct total.
+                rs["positions"].setdefault(pid, {})[sp] = new_pos
                 if pid in rs["playerStates"]:
                     rs["playerStates"][pid]["cash"] = rs["playerStates"][pid].get("cash", 0) + revenue
 
