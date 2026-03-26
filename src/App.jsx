@@ -268,9 +268,14 @@ export default function App() {
     if (screen !== "game" || !gun.current || !room || !sp) return;
     setOrderBook({}); setDaOrderBook({}); setIdOrderBook({});
     const daCycle = Math.floor(sp / DA_CYCLE);
-    gun.current.get(roomKey(room, `bm_${sp}`)).map().on((data, id) => { if (data && id) setOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
-    gun.current.get(roomKey(room, `da_${daCycle}`)).map().on((data, id) => { if (data && id) setDaOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
-    gun.current.get(roomKey(room, `id_${sp}`)).map().on((data, id) => { if (data && id) setIdOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
+    // active flag: prevents stale callbacks from old SPs polluting the current order book
+    // when GunDB replays cached data after a new listener is added, old-SP callbacks
+    // would otherwise inject bids for SP N-1 into the SP N order book.
+    let active = true;
+    gun.current.get(roomKey(room, `bm_${sp}`)).map().on((data, id) => { if (active && data && id) setOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
+    gun.current.get(roomKey(room, `da_${daCycle}`)).map().on((data, id) => { if (active && data && id) setDaOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
+    gun.current.get(roomKey(room, `id_${sp}`)).map().on((data, id) => { if (active && data && id) setIdOrderBook(p => ({ ...p, [id]: { ...data, id } })); });
+    return () => { active = false; };
   }, [sp, screen, room, gun]);
 
   const instructorNextPhase = useCallback(() => {
@@ -906,10 +911,19 @@ export default function App() {
     const { pid: id, name: n, room: rm, asset: ak, sp: t, role } = refs.current;
     if (!id || !gun.current || daSubmitted) return;
     if (!daMyBid.price || isNaN(+daMyBid.price) || +daMyBid.mw <= 0) return;
-    const m = marketForSp(t, refs.current.scenarioId, [], publishedForecast); const def = ASSETS[ak] || { col: "#ffffff" };
+    const m = marketForSp(t, refs.current.scenarioId, [], publishedForecast); const def = ASSETS[ak] || { col: "#ffffff", sides: "both" };
     const daCycle = Math.floor(t / DA_CYCLE);
     const isTraderRole = ROLES[role]?.canOwnAssets === false;
-    const bidSide = isTraderRole && daMyBid.side ? daMyBid.side : (m.forecast.isShort ? "offer" : "bid");
+    // DA bid side must reflect the asset's market role, not just current market direction.
+    // Generators (sides="short") always sell (offer) in DA regardless of forecast.
+    // Suppliers always buy (bid) — they cover customer demand.
+    // BESS/DSR (sides="both") correctly follow market direction to maximise their arbitrage.
+    // Traders set their own side explicitly.
+    const bidSide = isTraderRole && daMyBid.side ? daMyBid.side
+      : role === "SUPPLIER" ? "bid"
+      : def.sides === "short" ? "offer"
+      : def.sides === "long" ? "bid"
+      : (m.forecast.isShort ? "offer" : "bid");
     const bid = { id, name: n, asset: ak, mw: +daMyBid.mw, price: +daMyBid.price, side: bidSide, col: def.col, isBot: false };
     gun.current.get(roomKey(rm, `da_${daCycle}`)).get(id).put(bid);
     setDaSubmitted(true); refs.current.daSubmitted = true; setDaOrderBook(p => ({ ...p, [id]: bid }));

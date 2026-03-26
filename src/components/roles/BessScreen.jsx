@@ -26,7 +26,9 @@ export default function BessScreen(props) {
     // Revenue calculations
     // Bug fix: was adding cash + daCash which double-counts DA revenue since cash already includes it.
     const totalRev = Number(cash || 0);
-    const bmOnlyCash = (cash || 0) - (daCash || 0);
+    // Approximate non-DA revenue: total cash minus the DA portion tracked in daCash.
+    // Includes ID, BM, imbalance, and operating costs. Display only — not used for scoring.
+    const nonDaRev = (cash || 0) - (daCash || 0);
     const cSp = spContracts[sp]?.[pid] || { physicalMw: 0 };
     const risk = { expectedImbMw: Math.abs(contractPosition - (cSp.bmAccepted?.mw || 0)), worstCaseCost: Math.abs(contractPosition - (cSp.bmAccepted?.mw || 0)) * Math.max(sbp, ssp) };
 
@@ -413,8 +415,8 @@ export default function BessScreen(props) {
                         <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 12, color: "#f5b222", fontWeight: 800 }}>£{f0(daCash || 0)}</div>
                     </div>
                     <div>
-                        <div style={{ fontSize: 8, color: "#2a5570", marginBottom: 2 }}>BM + IMBALANCE</div>
-                        <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 12, color: "#38c0fc", fontWeight: 800 }}>£{f0(bmOnlyCash)}</div>
+                        <div style={{ fontSize: 8, color: "#2a5570", marginBottom: 2 }}>ID/BM/IMBAL</div>
+                        <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 12, color: "#38c0fc", fontWeight: 800 }}>£{f0(nonDaRev)}</div>
                     </div>
                     <div>
                         <div style={{ fontSize: 8, color: "#2a5570", marginBottom: 2 }}>TOTAL</div>
