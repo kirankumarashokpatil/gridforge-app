@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { TICK_MS, FREQ_FAIL_DURATION, GB_PHASE_TABLE } from '../../shared/constants';
 import { Tip } from '../shared/Tip';
 import { MarketInfoPanel } from '../shared/MarketInfoPanel';
@@ -41,6 +41,119 @@ const NEXT_PHASE = {
     BM: "BM_CLEAR",
     SETTLED: "RESULTS",
 };
+
+function getPhaseGuide(roleName, phase) {
+    const role = String(roleName || "").toUpperCase();
+    const G = {
+        FORECAST_0: {
+            title: "Plan Your Strategy — Initial Forecast Published",
+            body: "NESO has published demand and wind forecasts for all 48 settlement periods. Study the expected system conditions before the Day-Ahead auction opens.",
+            steps: {
+                GENERATOR: ["Check forecast demand vs your plant capacity for each SP", "Identify high-demand SPs where you can earn a price premium", "Set your minimum DA offer price above your marginal cost"],
+                BESS: ["Find SPs with the widest expected price spread (cheap charge → expensive discharge)", "Plan your state-of-charge trajectory across the day", "Set your cycle budget based on battery degradation cost"],
+                SUPPLIER: ["Review forecast demand against your total customer obligation", "Decide how much demand to hedge in the DA auction", "Note volatile SPs with high forecast uncertainty"],
+                TRADER: ["Scan for price-spread opportunities across all 48 SPs", "Set your speculative entry thresholds for long/short positions", "Identify SPs where supply/demand mismatch looks likely"],
+                DSR: ["Map your flexible demand windows across the 48 SPs", "Identify which SPs you can curtail if prices spike", "Set your curtailment cost floor — minimum price to reduce demand"],
+                NESO: ["Review demand and wind forecast for each SP", "Flag high-stress SPs (low wind + high demand) to players", "Use the Publish Forecast button to broadcast to all players"],
+                ELEXON: ["Confirm all player starting positions are at zero", "Prepare settlement baseline for the delivery day", "Monitor submission completeness when DA opens"],
+            },
+        },
+        FORECAST_1: {
+            title: "Revised Forecast — New Met Office Data Arrived",
+            body: "The 12Z NWP run has arrived with updated wind and demand data. Check what changed before IDA1 and decide if you need to revise your position.",
+            steps: {
+                GENERATOR: ["Compare updated wind output vs the opening forecast", "Adjust your IDA1 strategy if system direction changed significantly", "Note which SPs are now tighter (short) or looser (long)"],
+                BESS: ["Re-assess peak spread SPs with the revised forecast", "Update your charge/discharge plan for IDA1", "Check if any SPs flipped from long to short or vice versa"],
+                SUPPLIER: ["Check if the demand revision changes your hedge requirement", "Flag under-hedged SPs for IDA1 top-up action", "Review your updated procurement cost estimate"],
+                TRADER: ["Look for forecast revisions that signal price direction", "Update your IDA1 entry points based on the new data", "Spot any arbitrage between your DA price and the new forecast"],
+                DSR: ["Identify SPs where demand rose (more curtailment value)", "Prepare your flexibility windows for the IDA1 auction", "Estimate rebound impact on SPs after curtailment"],
+                NESO: ["Review the updated wind and demand numbers", "Broadcast revised forecast summary to players", "Flag SPs where system direction changed materially"],
+                ELEXON: ["Confirm DA settlement data is complete", "Update settlement tracker with DA auction results", "Prepare for IDA1 reconciliation"],
+            },
+        },
+        FORECAST_2: {
+            title: "Final Forecast — Sharp Short-Range Update",
+            body: "The 06Z short-range run gives the most accurate prediction of the day ahead. This is your last forecast update before IDA2 and the start of intraday gate closures.",
+            steps: {
+                GENERATOR: ["Check if plant availability has changed since DA", "Finalize your IDA2 volume based on this final forecast", "Prepare your BM bid price around expected short/long direction"],
+                BESS: ["Lock in your SoC plan for the delivery day", "Identify final charge/discharge SP windows for IDA2", "Set BM bid prices based on expected system direction"],
+                SUPPLIER: ["Confirm your hedge coverage for all 48 SPs", "Plan to top up any remaining exposure in IDA2", "Prepare demand-side response plan for BM if needed"],
+                TRADER: ["Make your final IDA2 directional decision now", "Size your position against your available margin", "Plan your BM exit strategy if market moves against you"],
+                DSR: ["Confirm curtailment capability for high-value SPs", "Review your IDA2 curtailment offer price", "Finalize your rebound schedule to avoid BM imbalance"],
+                NESO: ["Publish the final forecast update to players", "Identify SPs where reserve margin looks tight", "Brief players on expected system direction for the day"],
+                ELEXON: ["Cross-check IDA1 settlement data", "Monitor contract position completeness across all players", "Flag any data quality issues before gate closure begins"],
+            },
+        },
+        DA: {
+            title: "Day-Ahead Auction Open — Submit Your Bid NOW",
+            body: "The DA auction is live. Enter your price and volume and click Submit before NESO advances the phase. All 48 SPs clear simultaneously at a single price.",
+            steps: {
+                GENERATOR: ["Enter offer volume (MW) and minimum price (£/MWh) in Section 3 below", "Switch to EPEX Curve mode to set different prices per SP block", "Click SUBMIT DA OFFER — you can update it until the phase advances"],
+                BESS: ["Submit a sell offer for discharge SPs (high price) and buy bid for charge SPs (low price)", "Enter your MW volume and price limit in Section 3 below", "Click SUBMIT DA OFFER to register your curve with the market"],
+                SUPPLIER: ["Enter how much power to buy (MW) — aim to cover your forecast demand", "Set the maximum price you'll pay (£/MWh)", "Click SUBMIT DA PURCHASE — under-hedging now means imbalance costs later"],
+                TRADER: ["Choose BUY or SELL direction based on your price view", "Enter MW volume — your margin account covers position risk", "Click SUBMIT SPECULATIVE POSITION"],
+                DSR: ["Enter your curtailable demand (MW) and minimum curtailment price", "Your price is what you need to be paid to reduce consumption", "Click SUBMIT DA OFFER"],
+                NESO: ["Wait for all players to submit bids (check the order book panel)", "Click ADVANCE PHASE to clear the auction when everyone is ready", "DA prices and volumes clear automatically — results shown instantly"],
+                ELEXON: ["Monitor bid submission status across all players", "Note any missing submissions before the phase closes", "Prepare settlement baseline from DA auction results"],
+            },
+        },
+        IDA1: {
+            title: "Intraday Auction 1 — Revise Your Position",
+            body: "The first intraday auction is open. Use the IDA1 form to adjust the volume you bought or sold in DA. The IDA1 clears like a DA auction — batch, simultaneous, for all 48 SPs.",
+            steps: {
+                GENERATOR: ["Check your DA cleared position vs the revised forecast", "Enter a revised MW offer and price in the IDA1 form below", "Click SUBMIT IDA OFFER — this adjusts your net contracted position"],
+                BESS: ["Check if the forecast shift changes your optimal charge/discharge split", "Submit an IDA1 order to revise your net position", "Click SUBMIT IDA OFFER"],
+                SUPPLIER: ["Check your DA hedge ratio vs the updated demand forecast", "If under-hedged, buy additional MW in IDA1 at an acceptable price", "Click SUBMIT IDA PURCHASE"],
+                TRADER: ["Decide if your DA position still reflects your market view", "Counter-trade in IDA1 to reduce or extend exposure", "Click SUBMIT SPECULATIVE POSITION"],
+                DSR: ["Check if any SPs became more attractive for curtailment", "Submit a revised curtailment offer in IDA1", "Click SUBMIT IDA OFFER"],
+                NESO: ["Wait for players to revise their positions", "Click ADVANCE PHASE to clear IDA1", "IDA1 results update each player's contract position"],
+                ELEXON: ["Monitor IDA1 submission status", "Prepare reconciliation data for post-IDA1", "Track position changes from the DA baseline"],
+            },
+        },
+        IDA2: {
+            title: "Intraday Auction 2 — Last Batch Auction Before Gate Closure",
+            body: "This is the final batch auction before continuous intraday trading begins and SPs start gate-closing. After IDA2, only the ID continuous market is available.",
+            steps: {
+                GENERATOR: ["Make your final volume adjustment before continuous ID", "Enter MW and price in the IDA2 form below", "Click SUBMIT IDA OFFER"],
+                BESS: ["Finalise your charge/discharge position for the day", "Submit an IDA2 order to close any remaining position gap", "Click SUBMIT IDA OFFER"],
+                SUPPLIER: ["Ensure you're fully hedged before SP gate closure begins", "Buy any remaining exposure in IDA2", "Click SUBMIT IDA PURCHASE"],
+                TRADER: ["Make your final auction-style directional move", "Adjust size carefully — ID liquidity is thinner after this", "Click SUBMIT SPECULATIVE POSITION"],
+                DSR: ["Submit your final curtailment offer for the day", "Confirm your rebound schedule is feasible", "Click SUBMIT IDA OFFER"],
+                NESO: ["Wait for IDA2 submissions from all players", "Click ADVANCE PHASE to clear IDA2 and begin ID rounds", "After IDA2, 4 ID gate-closure rounds follow before REALTIME"],
+                ELEXON: ["Verify IDA2 position data for all players", "Track cumulative contract position per player", "Flag any anomalies before continuous ID gate closure starts"],
+            },
+        },
+        ID_ROUNDS: {
+            title: "Intraday Continuous — SPs Gate-Closing in Batches of 12",
+            body: "The continuous ID market closes SPs in 4 batches (1-12, 13-24, 25-36, 37-48). Once a batch closes, those SPs are locked. Submit your ID order before your target SPs gate-close.",
+            steps: {
+                GENERATOR: ["Choose BUY or SELL to adjust your net contracted position", "Enter MW volume and price limit in Section 3 below", "Click SUBMIT ID ORDER before each batch closes (NESO advances each round)"],
+                BESS: ["Submit BUY (charge) or SELL (discharge) for remaining open SPs", "Set a competitive price to improve your fill probability", "Click SUBMIT ID ORDER — use EDIT ORDER if you need to change it"],
+                SUPPLIER: ["Buy any last remaining exposure before your target SPs close", "Enter MW and maximum price in Section 3 below", "Click SUBMIT ID ORDER"],
+                TRADER: ["Price priority matters here — be competitive", "Submit orders early for SPs in the next closing batch", "Click SUBMIT ID ORDER — use EDIT ORDER to revise"],
+                DSR: ["Submit final curtailment offer for still-open SPs", "Check the SP timeline to see which SPs are still open", "Click SUBMIT ID ORDER"],
+                NESO: ["Click ADVANCE PHASE to close each batch of 12 SPs", "Watch the SP Timeline — closed SPs are locked in grey", "4 advances needed before REALTIME begins"],
+                ELEXON: ["Track gate closure progress per SP batch", "Monitor position freezing as each batch closes", "Prepare BM baseline from the frozen final positions"],
+            },
+        },
+        REALTIME: {
+            title: "REALTIME — Delivery Day. BM Opens Each SP.",
+            body: "Physical delivery is underway. NESO runs the BM for each SP to correct imbalances. The BM gate opens briefly per SP for final dispatch bids — watch for BM_OPEN.",
+            steps: {
+                GENERATOR: ["Watch for BM_OPEN — the gate opens for your final dispatch bid", "When BM opens: enter flex volume (MW) and BM bid price (£/MWh)", "Click SUBMIT OFFER TO NESO before the gate closes"],
+                BESS: ["Monitor system direction (SHORT = high SBP, LONG = low SSP)", "When BM opens: submit discharge offer (system SHORT) or charge bid (system LONG)", "Click SUBMIT BM BID — your SoC limits what you can offer"],
+                SUPPLIER: ["Monitor your residual demand exposure vs contracted position", "Track NIV — a long system means lower imbalance cost for net buyers", "Prepare demand-side actions for high-price SPs"],
+                TRADER: ["Read live NIV to judge system direction", "Track your deviation from contract vs imbalance penalty accumulating", "Monitor your P&L in the top bar — deviate = pay SBP or earn SSP"],
+                DSR: ["If system is SHORT, this is your highest-value curtailment window", "When BM opens: submit curtailment offer at or above your cost floor", "Click SUBMIT DSR OFFER before BM closes"],
+                NESO: ["Click ADVANCE PHASE to open each SP's BM gate", "Accept economic merit-order bids to balance the system", "Monitor NIV and frequency in the centre panel"],
+                ELEXON: ["Track each accepted BM action — builds the settlement record", "Monitor SBP/SSP prices for the imbalance settlement", "Prepare SP-level audit trail for post-session review"],
+            },
+        },
+    };
+    const guide = G[phase] || G["FORECAST_0"];
+    const steps = guide.steps[role] || guide.steps["GENERATOR"] || ["Review market state", "Check your position", "Prepare next action"];
+    return { title: guide.title, body: guide.body, steps };
+}
 
 function roleChecklist(roleName, phase) {
     const role = String(roleName || "").toUpperCase();
@@ -135,7 +248,16 @@ export default function SharedLayout({
 }) {
     const [showForecast, setShowForecast] = useState(false);
     const [selectedSP, setSelectedSP] = useState(null);
-    
+    const [showGuide, setShowGuide] = useState(true);
+    const prevPhaseRef = useRef(phase);
+
+    useEffect(() => {
+        if (phase !== prevPhaseRef.current) {
+            setShowGuide(true);
+            prevPhaseRef.current = phase;
+        }
+    }, [phase]);
+
     // Expose phase state for E2E test diagnostics
     useEffect(() => {
         if (typeof window !== 'undefined') {
@@ -434,24 +556,35 @@ export default function SharedLayout({
                     </div>
                 </div>
 
-                <div style={{ width: "100%", display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 8, color: "#4d7a96", letterSpacing: 0.6, fontWeight: 800 }}>ROLE PLAYBOOK</span>
-                    <span style={{ fontSize: 9, color: "#ddeeff" }}>• {checklist[0]} • {checklist[1]} • {checklist[2]}</span>
-                </div>
-
-                <div style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 9 }}>
-                    <span style={{ fontWeight: 700, color: "#4d7a96" }}>CHECKLIST</span>
-                    {checklist.map((item, idx) => (
-                        <span key={idx} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 999, background: "#0c1c2a", border: "1px solid #1a3045", color: "#ddeeff" }}>
-                            <span style={{ color: "#1de98b" }}>•</span>
-                            <span style={{ fontSize: 9 }}>{item}</span>
-                        </span>
-                    ))}
-                </div>
-                <div style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, fontSize: 9, color: "#94a3b8" }}>
-                    <span style={{ fontWeight: 700, color: "#4d7a96" }}>ACTIONS</span>
-                    <span>{gateAction}</span>
-                </div>
+                {/* ─── PHASE GUIDE (expandable) ─── */}
+                {(() => {
+                    const guide = getPhaseGuide(roleName, phase);
+                    return (
+                        <div style={{ width: "100%", borderTop: "1px solid #1a3045", paddingTop: 4, marginTop: 2 }}>
+                            <button
+                                onClick={() => setShowGuide(s => !s)}
+                                style={{ background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left" }}
+                            >
+                                <span style={{ fontSize: 8, color: "#f5b222", fontWeight: 800, letterSpacing: 0.6 }}>PHASE GUIDE</span>
+                                <span style={{ fontSize: 9, color: "#ddeeff", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{guide.title}</span>
+                                <span style={{ fontSize: 9, color: "#4d7a96", flexShrink: 0 }}>{showGuide ? "▲ hide" : "▼ show"}</span>
+                            </button>
+                            {showGuide && (
+                                <div style={{ marginTop: 6, padding: "10px 12px", background: "#061018", border: "1px solid #f5b22233", borderRadius: 6 }}>
+                                    <p style={{ fontSize: 9, color: "#94a3b8", lineHeight: 1.5, margin: "0 0 8px" }}>{guide.body}</p>
+                                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                        {guide.steps.map((step, i) => (
+                                            <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 6, background: "#0c1c2a", border: "1px solid #1a3045", borderRadius: 5, padding: "6px 10px", flex: "1 1 200px" }}>
+                                                <span style={{ color: "#f5b222", fontWeight: 800, fontSize: 10, flexShrink: 0 }}>{i + 1}.</span>
+                                                <span style={{ fontSize: 9, color: "#ddeeff", lineHeight: 1.4 }}>{step}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    );
+                })()}
             </div>
 
             {/* ─── MAIN GRID ─── */}

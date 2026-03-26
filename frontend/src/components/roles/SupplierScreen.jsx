@@ -270,6 +270,7 @@ export default function SupplierScreen(props) {
 
     // --- SECTION 3: PROCUREMENT ---
     const isDa = ["DA", "IDA1", "IDA2"].includes(phase);
+    const isIda = ["IDA1", "IDA2"].includes(phase);
     const isId = phase === "ID" || phase === "ID_ROUNDS";
 
     const sect3Procurement = (
@@ -282,7 +283,33 @@ export default function SupplierScreen(props) {
 
             {isDa && (
                 <>
-                    {daAlreadyCleared ? (
+                    {daAlreadyCleared && isIda ? (
+                        /* IDA1/IDA2 — show re-purchase form prominently, DA results below */
+                        <>
+                            <div style={{ background: "#061018", border: "1px solid #fb923c55", borderRadius: 8, padding: 14, marginBottom: 12 }}>
+                                <div style={{ fontSize: 10, color: "#fb923c", fontWeight: 800, letterSpacing: 1, marginBottom: 4 }}>{phase} — ADJUST YOUR HEDGE</div>
+                                <p style={{ fontSize: 9, color: "#4d7a96", lineHeight: 1.5, margin: "0 0 12px" }}>Your current contracted position: <strong style={{ color: "#f5b222" }}>{f0(Math.abs(props.contractPosition || 0))} MW</strong>. Enter volume to additionally buy (if under-hedged) or sell (if over-hedged).</p>
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+                                    <div>
+                                        <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 6, display: "block" }}>VOLUME (MW)</label>
+                                        <input type="number" value={daMyBid.mw} onChange={e => setDaMyBid(b => ({ ...b, mw: e.target.value, side: "buy" }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#ddeeff", fontSize: 14, fontFamily: "'JetBrains Mono'", boxSizing: "border-box" }} />
+                                    </div>
+                                    <div>
+                                        <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 6, display: "block" }}>MAX PRICE £/MWh</label>
+                                        <input type="number" value={daMyBid.price} onChange={e => setDaMyBid(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#f5b222", fontSize: 14, fontFamily: "'JetBrains Mono'", boxSizing: "border-box" }} />
+                                    </div>
+                                </div>
+                                <button onClick={() => { setDaMyBid(b => ({ ...b, side: "buy" })); onDaSubmit(); }} disabled={!daMyBid.price} style={{ width: "100%", padding: "12px", background: "#fb923c", border: "none", borderRadius: 6, color: "#050e16", fontWeight: 800, fontSize: 12, cursor: daMyBid.price ? "pointer" : "default", opacity: daMyBid.price ? 1 : 0.5 }}>
+                                    {daSubmitted ? `UPDATE ${phase} PURCHASE →` : `SUBMIT ${phase} PURCHASE →`}
+                                </button>
+                            </div>
+                            <details style={{ fontSize: 9 }}>
+                                <summary style={{ color: "#4d7a96", cursor: "pointer", marginBottom: 6 }}>View DA Clearing Results ▼</summary>
+                                <DAClearingChart daAuctionResults={daAuctionResults} pid={pid} currentSp={sp} />
+                                <DAResultsTable daAuctionResults={daAuctionResults} daPositions={daPositions} positions={positions} pid={pid} currentSp={sp} />
+                            </details>
+                        </>
+                    ) : daAlreadyCleared ? (
                         <>
                             <DAClearingChart
                                 daAuctionResults={daAuctionResults}

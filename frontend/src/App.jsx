@@ -1622,6 +1622,7 @@ export default function App() {
       myBid, setMyBid, submitted, onSubmit: submitBid,
       daMyBid, setDaMyBid, daSubmitted, onDaSubmit: submitDaBid,
       idMyOrder, setIdMyOrder, idSubmitted, onIdSubmit: submitIdOrder,
+      onEditIdOrder: () => setIdSubmitted(false),
       idOrderBook: visibleIdOrders,
       daOrderBook: visibleDaOrders,
       daResult, currentSp: sp, simRes: lastRes, bmOrderBook: allBids,

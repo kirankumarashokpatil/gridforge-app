@@ -222,6 +222,7 @@ export default function GeneratorScreen(props) {
     // --- SECTION 3: MARKET BIDS ---
     const isForecast = ["FORECAST_0", "FORECAST_1", "FORECAST_2"].includes(phase);
     const isDa = ["DA", "IDA1", "IDA2"].includes(phase);
+    const isIda = ["IDA1", "IDA2"].includes(phase);
     const isId = phase === "ID" || phase === "ID_ROUNDS";
     const isBm = ["BM", "BM_OPEN", "REALTIME"].includes(phase);
 
@@ -255,8 +256,34 @@ export default function GeneratorScreen(props) {
             {isDa && (
                 <>
                     <ForecastUpdateBanner forecastUpdateSummary={props.forecastUpdateSummary} compact />
-                    {daAlreadyCleared ? (
-                        /* DA already cleared for all 48 SPs — show chart + per-SP results table */
+                    {daAlreadyCleared && isIda ? (
+                        /* IDA1/IDA2 — show re-bid form prominently, DA results below */
+                        <>
+                            <div style={{ background: "#061018", border: "1px solid #fb923c55", borderRadius: 8, padding: 14, marginBottom: 12 }}>
+                                <div style={{ fontSize: 10, color: "#fb923c", fontWeight: 800, letterSpacing: 1, marginBottom: 4 }}>{phase} — REVISE YOUR POSITION</div>
+                                <p style={{ fontSize: 9, color: "#4d7a96", lineHeight: 1.5, margin: "0 0 12px" }}>Your DA contracted position: <strong style={{ color: "#f5b222" }}>{f0(contractPosition)} MW</strong>. Enter an additional volume to buy or sell in this intraday auction to adjust your net position.</p>
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+                                    <div>
+                                        <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 6, display: "block" }}>ADJUST VOLUME (MW)</label>
+                                        <input type="number" value={daMyBid.mw} onChange={e => setDaMyBid(b => ({ ...b, mw: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#ddeeff", fontSize: 14, fontFamily: "'JetBrains Mono'", boxSizing: "border-box" }} />
+                                    </div>
+                                    <div>
+                                        <label style={{ fontSize: 9, color: "#4d7a96", marginBottom: 6, display: "block" }}>PRICE LIMIT £/MWh</label>
+                                        <input type="number" value={daMyBid.price} onChange={e => setDaMyBid(b => ({ ...b, price: e.target.value }))} style={{ width: "100%", padding: "10px", background: "#102332", border: "1px solid #234159", borderRadius: 6, color: "#f5b222", fontSize: 14, fontFamily: "'JetBrains Mono'", boxSizing: "border-box" }} />
+                                    </div>
+                                </div>
+                                <button onClick={onDaSubmit} disabled={!daMyBid.price} style={{ width: "100%", padding: "12px", background: "#fb923c", border: "none", borderRadius: 6, color: "#050e16", fontWeight: 800, fontSize: 12, cursor: daMyBid.price ? "pointer" : "default", opacity: daMyBid.price ? 1 : 0.5 }}>
+                                    {daSubmitted ? `UPDATE ${phase} OFFER →` : `SUBMIT ${phase} OFFER →`}
+                                </button>
+                            </div>
+                            <details style={{ fontSize: 9 }}>
+                                <summary style={{ color: "#4d7a96", cursor: "pointer", marginBottom: 6 }}>View DA Clearing Results ▼</summary>
+                                <DAClearingChart daAuctionResults={daAuctionResults} pid={pid} currentSp={sp} />
+                                <DAResultsTable daAuctionResults={daAuctionResults} daPositions={daPositions} positions={positions} pid={pid} currentSp={sp} />
+                            </details>
+                        </>
+                    ) : daAlreadyCleared ? (
+                        /* DA already cleared, not in IDA — show chart + per-SP results */
                         <>
                             <DAClearingChart
                                 daAuctionResults={daAuctionResults}
@@ -357,9 +384,16 @@ export default function GeneratorScreen(props) {
                     {idMyOrder.mw > 0 && idMyOrder.mw < (def?.minMw || 0) && (
                         <div style={{ fontSize: 8.5, color: "#f5b222", fontWeight: 700, padding: "6px 0", textAlign: "center" }}>⚠️ Warning: Output below Min Stable ({def.minMw}MW) will trip the plant.</div>
                     )}
-                    <button data-testid="gen-submit-id-order" onClick={onIdSubmit} disabled={idSubmitted || !idMyOrder.price} style={{ marginTop: 16, width: "100%", padding: "12px", background: idSubmitted ? "#1a3045" : "#38c0fc", border: "none", borderRadius: 6, color: idSubmitted ? "#4d7a96" : "#050e16", fontWeight: 800, fontSize: 12, cursor: idSubmitted ? "default" : "pointer" }}>
-                        {idSubmitted ? "✓ ID ORDER PUBLISHED" : "SUBMIT ID ORDER →"}
-                    </button>
+                    {idSubmitted ? (
+                        <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
+                            <div style={{ flex: 1, padding: "12px", background: "#061018", border: "1px solid #1de98b44", borderRadius: 6, color: "#1de98b", fontSize: 10, fontWeight: 800, textAlign: "center" }}>✓ ID ORDER PUBLISHED</div>
+                            {props.onEditIdOrder && <button onClick={props.onEditIdOrder} style={{ padding: "12px 14px", background: "#102332", border: "1px solid #f5b22266", borderRadius: 6, color: "#f5b222", fontSize: 10, fontWeight: 800, cursor: "pointer" }}>EDIT ORDER</button>}
+                        </div>
+                    ) : (
+                        <button data-testid="gen-submit-id-order" onClick={onIdSubmit} disabled={!idMyOrder.price} style={{ marginTop: 16, width: "100%", padding: "12px", background: "#38c0fc", border: "none", borderRadius: 6, color: "#050e16", fontWeight: 800, fontSize: 12, cursor: "pointer" }}>
+                            SUBMIT ID ORDER →
+                        </button>
+                    )}
                 </>
             )}
 
