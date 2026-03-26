@@ -149,9 +149,18 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            await manager.broadcast_to_room(room_id, message)
+            raw = await websocket.receive_text()
+            try:
+                message = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue  # silently drop malformed frames
+
+            # Only relay whitelisted client-originated message types.
+            # All game-state mutations flow through REST→bus→worker;
+            # the WS receive path is kept for heartbeats / typing indicators only.
+            msg_type = message.get("type")
+            if msg_type in ("ping", "heartbeat", "typing"):
+                await manager.broadcast_to_room(room_id, message)
     except WebSocketDisconnect:
         manager.disconnect(room_id, websocket)
 

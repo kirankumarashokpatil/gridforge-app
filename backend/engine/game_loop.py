@@ -37,11 +37,12 @@ import time
 from .constants import (
     ASSETS, SP_DURATION_H, SPS_PER_DAY, FORGIVENESS, SCORING_CONFIG,
     GAME_MODES, CASHOUT_MODE, IDA_CONFIG,
-    GB_PHASE_TABLE, MARKET_COMPARISON,
+    GB_PHASE_TABLE, MARKET_COMPARISON, PHASE_DURATIONS,
 )
 from .market_engine import (
     market_for_sp, clear_bm, clear_da, clear_ida, ida_forecast,
     feedback_market_state, compute_forecasts, generate_forecast_update,
+    compute_niv,
 )
 from .asset_physics import init_sof, update_sof, supplier_demand_mw
 from .scoring_engine import compute_role_score, compute_system_score, compute_overall_score
@@ -49,7 +50,7 @@ from .physical_engine import (
     create_system_state, update_system_state,
     compute_player_system_impact, update_player_impact, build_player_stats,
 )
-from .da_curve_engine import clear_full_auction
+from .da_curve_engine import clear_full_auction, validate_full_curve
 from .id_trading_engine import clear_id_round
 from .forecast_engine import ForecastEngine
 
@@ -116,6 +117,9 @@ def _new_room_state(seed: int | None = None) -> dict:
         "cashoutMode": CASHOUT_MODE,
         "tickSpeed": 15000,
         "paused": False,
+        "advanceMode": "AUTO",       # "MANUAL" | "AUTO"
+        "simSpeedId": "NORMAL",      # key into SIM_SPEEDS
+        "simSpeedFactor": 0.33,      # multiplier on PHASE_DURATIONS
 
         # Markets for all 48 SPs (populated during FORECAST_0)
         "markets": {},               # sp(1-48) → { forecast, actual }
@@ -172,6 +176,20 @@ def _new_room_state(seed: int | None = None) -> dict:
         #   FORECAST_1 → 12Z run (D-1 after DA 09:30)
         #   FORECAST_2 → 06Z short-range run (D 07:30)
         "forecastUpdateHistory": [],
+
+        # ── Nested SP Timeline (per-SP gate closure + BM state) ──────────
+        # Tracks intraday gate closure and per-SP BM progression.
+        # phase: ID_OPEN → GC_PASSED → BM_OPEN → BM_CLEAR → SP_SETTLED → SETTLED
+        "spTimeline": {
+            sp: {
+                "phase": "ID_OPEN",
+                "gateClosed": False,
+                "bmSubPhase": None,
+            }
+            for sp in range(1, SPS_PER_DAY + 1)
+        },
+        # ID gate closure round counter (advances during ID_ROUNDS)
+        "idRound": 0,
     }
 
 
@@ -226,6 +244,9 @@ def get_room_state(room_id: str) -> dict:
         "cashoutMode": rs["cashoutMode"],
         "tickSpeed": rs["tickSpeed"],
         "paused": rs["paused"],
+        "advanceMode": rs.get("advanceMode", "AUTO"),
+        "simSpeedId": rs.get("simSpeedId", "NORMAL"),
+        "simSpeedFactor": rs.get("simSpeedFactor", 0.33),
         "rngSeed": rs.get("rngSeed"),
         "markets": rs["markets"],
         "positions": rs["positions"],
@@ -258,6 +279,9 @@ def get_room_state(room_id: str) -> dict:
         # GB market phase metadata — labels, real timing, market type
         "phaseInfo": GB_PHASE_TABLE.get(rs["dayPhase"]),
         "marketComparison": MARKET_COMPARISON,
+        # Nested SP timeline for ID gate closure + per-SP BM state
+        "spTimeline": rs.get("spTimeline", {}),
+        "idRound": rs.get("idRound", 0),
     }
 
 
@@ -347,6 +371,7 @@ def advance_day_phase(room_id: str) -> dict:
         result.update(_start_new_day(snap))
         snap["dayPhase"] = "FORECAST_0"
         snap["phaseStartTs"] = int(time.time() * 1000)
+        _apply_phase_tick(snap)
         result["newPhase"] = snap["dayPhase"]
         # Atomically commit snapshot
         _room_states[room_id] = snap
@@ -360,6 +385,7 @@ def advance_day_phase(room_id: str) -> dict:
         snap["currentSp"] = 1
         snap["bmSubPhase"] = "BM_OPEN"
         snap["bmOrderBook"] = {}
+        _recompute_niv_for_sp(snap, 1)
     else:
         snap["dayPhase"] = _next_day_phase(old_phase, snap)
         # If we jumped straight to REALTIME (e.g. TUTORIAL skips DA/IDA/ID)
@@ -367,12 +393,16 @@ def advance_day_phase(room_id: str) -> dict:
             snap["currentSp"] = 1
             snap["bmSubPhase"] = "BM_OPEN"
             snap["bmOrderBook"] = {}
+            _recompute_niv_for_sp(snap, 1)
 
     result["newPhase"] = snap["dayPhase"]
     result["currentSp"] = snap["currentSp"]
 
     # Update phase start timestamp for client countdown timers
     snap["phaseStartTs"] = int(time.time() * 1000)
+
+    # Apply per-phase tick duration (scales with instructor speed preset)
+    _apply_phase_tick(snap)
 
     # ── Atomically replace live room state with the mutated snapshot ────────
     _room_states[room_id] = snap
@@ -382,6 +412,28 @@ def advance_day_phase(room_id: str) -> dict:
 # ═══════════════════════════════════════════════
 # REALTIME / BM PHASE (SP-by-SP)
 # ═══════════════════════════════════════════════
+
+def _recompute_niv_for_sp(rs: dict, sp: int) -> None:
+    """Recompute NIV for a SP using the real GB formula (hybrid).
+
+    Called when entering BM_OPEN for a new SP. Adjusts the actual market
+    state to account for player contracted positions accumulated during
+    DA/IDA/ID trading.  Updates rawImbalanceMw, niv, indicativeNiv,
+    and isShort in-place on market["actual"].
+    """
+    market = rs.get("markets", {}).get(sp)
+    if not market or not market.get("actual"):
+        return
+    actual = market["actual"]
+    system = actual.get("system", {})
+    base_noise = actual.get("baseNoise", actual.get("rawImbalanceMw", 0))
+    positions = rs.get("positions", {})
+    niv_result = compute_niv(system, base_noise, positions, sp)
+    actual["niv"] = niv_result["niv"]
+    actual["rawImbalanceMw"] = niv_result["niv"]
+    actual["indicativeNiv"] = niv_result["niv"]
+    actual["isShort"] = niv_result["isShort"]
+    actual["nivBreakdown"] = niv_result
 
 def advance_bm(room_id: str) -> dict:
     """
@@ -424,6 +476,7 @@ def advance_bm(room_id: str) -> dict:
             snap["currentSp"] = sp + 1
             snap["bmSubPhase"] = "BM_OPEN"
             snap["bmOrderBook"] = {}
+            _recompute_niv_for_sp(snap, sp + 1)
             result["sp"] = sp + 1
 
     result["bmSubPhase"] = snap["bmSubPhase"]
@@ -432,9 +485,42 @@ def advance_bm(room_id: str) -> dict:
     # Update phase start timestamp for client countdown timers
     snap["phaseStartTs"] = int(time.time() * 1000)
 
+    # Apply per-phase tick duration (BM_OPEN/BM_CLEAR/SP_SETTLED have different speeds)
+    _apply_phase_tick(snap)
+
     # ── Atomically replace live room state with the mutated snapshot ────────
     _room_states[room_id] = snap
     return result
+
+
+# ═══════════════════════════════════════════════
+# PER-PHASE TICK SPEED
+# ═══════════════════════════════════════════════
+
+def _apply_phase_tick(rs: dict) -> None:
+    """Set tickSpeed from PHASE_DURATIONS for the current phase/sub-phase.
+
+    Uses the BM sub-phase key during REALTIME, otherwise the dayPhase key.
+    The base duration is multiplied by simSpeedFactor (set by instructor's
+    sim-speed preset), so switching from NORMAL→FAST scales all phases.
+
+    In MANUAL advance mode, tickSpeed is set very high (999999) so the
+    client timer never fires — the instructor must click to advance.
+    """
+    if rs.get("advanceMode") == "MANUAL":
+        rs["tickSpeed"] = 999_999
+        return
+
+    if rs["dayPhase"] == "REALTIME" and rs.get("bmSubPhase"):
+        key = rs["bmSubPhase"]
+    elif rs["dayPhase"] == "RESULTS":
+        key = "RESULTS"
+    else:
+        key = rs["dayPhase"]
+    duration = PHASE_DURATIONS.get(key)
+    if duration is not None:
+        factor = rs.get("simSpeedFactor", 0.33)
+        rs["tickSpeed"] = max(2000, int(duration * factor))
 
 
 # ═══════════════════════════════════════════════
@@ -1156,6 +1242,12 @@ def _start_new_day(rs: dict) -> dict:
     rs["bmResults"] = {}
     rs["spSettlements"] = {}
     rs["phaseStartTs"] = int(time.time() * 1000)
+    # Reset nested SP timeline and ID round counter
+    rs["spTimeline"] = {
+        sp: {"phase": "ID_OPEN", "gateClosed": False, "bmSubPhase": None}
+        for sp in range(1, SPS_PER_DAY + 1)
+    }
+    rs["idRound"] = 0
     # playerStates, systemState, forecastEngine persist across days
     return {"newDay": rs["day"]}
 
@@ -1164,6 +1256,55 @@ def _start_new_day(rs: dict) -> dict:
 # BID SUBMISSION
 # ═══════════════════════════════════════════════
 
+# ── Validation helpers ──
+
+_MAX_PRICE = 9999
+_MIN_PRICE = -500
+_MAX_MW = 2000  # absolute ceiling (largest asset is NUCLEAR at 1000 MW)
+
+def _is_num(v) -> bool:
+    try:
+        float(v)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_bid(bid: dict, rs: dict, player_id: str | None = None) -> str | None:
+    """Return an error string if the bid is malformed, else None."""
+    mw = bid.get("mw")
+    price = bid.get("price")
+    sp = bid.get("sp")
+
+    if mw is not None:
+        if not _is_num(mw) or float(mw) < 0:
+            return f"MW must be a non-negative number, got {mw}"
+        if float(mw) > _MAX_MW:
+            return f"MW must be <= {_MAX_MW}, got {mw}"
+
+    if price is not None:
+        if not _is_num(price):
+            return f"Price must be a number, got {price}"
+        p = float(price)
+        if p < _MIN_PRICE or p > _MAX_PRICE:
+            return f"Price must be between {_MIN_PRICE} and {_MAX_PRICE}, got {p}"
+
+    if sp is not None:
+        try:
+            sp_int = int(sp)
+        except (TypeError, ValueError):
+            return f"SP must be an integer 1-{SPS_PER_DAY}, got {sp}"
+        if sp_int < 1 or sp_int > SPS_PER_DAY:
+            return f"SP must be 1-{SPS_PER_DAY}, got {sp_int}"
+
+    if player_id is not None:
+        ps = rs.get("playerStates", {})
+        if ps and player_id not in ps:
+            return f"Unknown player {player_id}"
+
+    return None
+
+
 def submit_da_bids(room_id: str, player_id: str, bids: list[dict]) -> dict:
     """
     Submit DA bids for multiple SPs.
@@ -1171,6 +1312,10 @@ def submit_da_bids(room_id: str, player_id: str, bids: list[dict]) -> dict:
     If sp is omitted, bid applies to all SPs.
     """
     rs = _get_room(room_id)
+    for b in bids:
+        err = _validate_bid(b, rs, player_id)
+        if err:
+            return {"success": False, "error": err}
     rs["daOrderBook"][player_id] = bids
     return {"success": True, "count": len(bids)}
 
@@ -1178,6 +1323,11 @@ def submit_da_bids(room_id: str, player_id: str, bids: list[dict]) -> dict:
 def submit_da_curve(room_id: str, player_id: str, curve: dict) -> dict:
     """Submit a DA curve for the full auction mechanism."""
     rs = _get_room(room_id)
+    segments = curve.get("segments", [])
+    if segments:
+        val = validate_full_curve(segments)
+        if not val["valid"]:
+            return {"success": False, "error": "; ".join(val["errors"])}
     rs["daCurves"][player_id] = curve
     return {"success": True}
 
@@ -1189,6 +1339,12 @@ def submit_ida_bids(room_id: str, ida_round: str, player_id: str,
     ida_round: "IDA1" or "IDA2"
     """
     rs = _get_room(room_id)
+    if ida_round.upper() not in ("IDA1", "IDA2"):
+        return {"success": False, "error": f"Invalid IDA round: {ida_round}"}
+    for b in bids:
+        err = _validate_bid(b, rs, player_id)
+        if err:
+            return {"success": False, "error": err}
     ob_key = f"{ida_round.lower()}OrderBook"
     rs[ob_key][player_id] = bids
     return {"success": True, "count": len(bids)}
@@ -1198,6 +1354,10 @@ def submit_id_orders(room_id: str, player_id: str,
                      orders: list[dict]) -> dict:
     """Submit continuous ID orders for specific SPs."""
     rs = _get_room(room_id)
+    for o in orders:
+        err = _validate_bid(o, rs, player_id)
+        if err:
+            return {"success": False, "error": err}
     rs["idOrderBook"][player_id] = orders
     return {"success": True, "count": len(orders)}
 
@@ -1205,6 +1365,9 @@ def submit_id_orders(room_id: str, player_id: str,
 def submit_bm_bid(room_id: str, player_id: str, bid: dict) -> dict:
     """Submit a BM bid for the current SP (during REALTIME only)."""
     rs = _get_room(room_id)
+    err = _validate_bid(bid, rs, player_id)
+    if err:
+        return {"success": False, "error": err}
     rs["bmOrderBook"][player_id] = {**bid, "id": player_id}
     return {"success": True, "sp": rs["currentSp"]}
 
@@ -1212,6 +1375,20 @@ def submit_bm_bid(room_id: str, player_id: str, bid: dict) -> dict:
 def submit_neso_overrides(room_id: str, sp: int, overrides: dict) -> dict:
     """NESO player submits acceptance overrides for a specific SP's BM."""
     rs = _get_room(room_id)
+    if not isinstance(sp, int) or sp < 1 or sp > SPS_PER_DAY:
+        return {"success": False, "error": f"SP must be 1-{SPS_PER_DAY}"}
+    vol_cap = overrides.get("volumeCap")
+    if vol_cap is not None:
+        if not _is_num(vol_cap) or float(vol_cap) < 0:
+            return {"success": False, "error": "volumeCap must be non-negative"}
+    player_states = rs.get("playerStates", {})
+    for key in ("reject", "priority"):
+        ids = overrides.get(key, [])
+        if not isinstance(ids, list):
+            return {"success": False, "error": f"{key} must be a list"}
+        for pid in ids:
+            if pid not in player_states:
+                return {"success": False, "error": f"Unknown player {pid} in {key}"}
     rs.setdefault("nesoOverrides", {})[sp] = overrides
     return {"success": True}
 
@@ -1303,6 +1480,7 @@ def replay_from_events(
             rs["dayPhase"] = "REALTIME"
             rs["currentSp"] = 1
             rs["bmSubPhase"] = "BM_OPEN"
+            _recompute_niv_for_sp(rs, 1)
             # Freeze positions (we have nothing in order books, so use DB positions)
             rs["frozenPositions"] = {
                 pid: dict(sps) for pid, sps in rs["positions"].items()
@@ -1411,10 +1589,164 @@ def publish_forecast(room_id: str, forecast_data: dict | None = None) -> dict:
 
 def set_room_config(room_id: str, config: dict) -> dict:
     rs = _get_room(room_id)
-    for key in ("scenarioId", "cashoutMode", "gameMode", "tickSpeed", "paused"):
+    for key in ("scenarioId", "cashoutMode", "gameMode", "tickSpeed", "paused",
+                "advanceMode", "simSpeedId", "simSpeedFactor"):
         if key in config:
             rs[key] = config[key]
+    # When advanceMode or simSpeedFactor changes, recalculate current tickSpeed
+    if "advanceMode" in config or "simSpeedFactor" in config:
+        _apply_phase_tick(rs)
     return {"success": True}
+
+
+# ═══════════════════════════════════════════════
+# NESTED SP TIMELINE — per-SP gate closure + trading eligibility
+# ═══════════════════════════════════════════════
+
+# ID gate closure schedule: SPs close in batches as delivery approaches.
+# In real GB, gate closure is 1h before delivery for each SP.
+# We model this as 4 rounds during ID_ROUNDS, closing ~12 SPs each.
+_ID_GC_BATCHES = [
+    list(range(1, 13)),     # Round 1: SPs 1-12 (nearest delivery)
+    list(range(13, 25)),    # Round 2: SPs 13-24
+    list(range(25, 37)),    # Round 3: SPs 25-36
+    list(range(37, 49)),    # Round 4: SPs 37-48 (furthest)
+]
+
+
+def _advance_id_sub_round(rs: dict) -> dict:
+    """Advance one ID gate-closure sub-round.
+
+    Each sub-round closes the next batch of SPs for intraday trading and
+    runs order-book clearing only for the newly-closed SPs.  After all
+    batches are closed, the ID_ROUNDS phase is complete.
+
+    Returns a result dict describing what happened.
+    """
+    current_round = rs.get("idRound", 0)
+    if current_round >= len(_ID_GC_BATCHES):
+        return {"idRoundsComplete": True, "idRound": current_round}
+
+    closing_sps = _ID_GC_BATCHES[current_round]
+    timeline = rs.get("spTimeline", {})
+
+    # Mark these SPs as gate-closed
+    for sp in closing_sps:
+        tl = timeline.get(sp)
+        if tl:
+            tl["gateClosed"] = True
+            tl["phase"] = "GC_PASSED"
+
+    # Clear ID orders only for the newly-closed SPs
+    id_book = rs.get("idOrderBook", {})
+    id_result = clear_id_round(id_book, open_sps=closing_sps)
+
+    # Apply position deltas from matched trades
+    for pid, sp_deltas in id_result.get("positionDeltas", {}).items():
+        for sp_key, delta in sp_deltas.items():
+            rs["positions"].setdefault(pid, {})[sp_key] = (
+                rs["positions"].get(pid, {}).get(sp_key, 0) + delta
+            )
+
+    # Apply cash deltas
+    for pid, cash_delta in id_result.get("cashDeltas", {}).items():
+        ps = rs["playerStates"].get(pid)
+        if ps:
+            ps["cash"] = ps.get("cash", 0) + cash_delta
+
+    rs["idRound"] = current_round + 1
+
+    _emit(rs, "ID_GC_ROUND", {
+        "round": current_round + 1,
+        "closedSps": closing_sps,
+        "tradesMatched": len(id_result.get("trades", [])),
+        "totalVolumeMW": id_result.get("totalVolume", 0),
+    })
+
+    return {
+        "idRound": current_round + 1,
+        "closedSps": closing_sps,
+        "idTradesMatched": len(id_result.get("trades", [])),
+        "totalVolumeMW": id_result.get("totalVolume", 0),
+        "idRoundsComplete": (current_round + 1) >= len(_ID_GC_BATCHES),
+    }
+
+
+def can_trade_sp(rs: dict, sp: int) -> bool:
+    """Check if a given SP is still tradable in the current phase.
+
+    DA/IDA: all 48 SPs tradable (parallel auction).
+    IDA2: real GB only covers SPs 25-48, but we keep all 48 for simplicity.
+    ID_ROUNDS: tradable until gate closure for that SP.
+    REALTIME: no ID trading (BM only).
+    """
+    day_phase = rs.get("dayPhase")
+    if day_phase in ("DA", "IDA1", "IDA2"):
+        return True
+    if day_phase == "ID_ROUNDS":
+        timeline = rs.get("spTimeline", {}).get(sp, {})
+        return not timeline.get("gateClosed", False)
+    return False
+
+
+def advance_game(room_id: str) -> dict:
+    """Unified advance: routes to the correct inner handler.
+
+    Single entry point for NESO / Instructor button clicks.
+    Replaces the need for clients to distinguish advance_day_phase vs advance_bm.
+
+    During ID_ROUNDS: advances gate-closure sub-rounds, then transitions
+    to REALTIME once all ID rounds complete.
+
+    During REALTIME: delegates to advance_bm().
+
+    All other phases: delegates to advance_day_phase().
+    """
+    rs = _get_room(room_id)
+    phase = rs["dayPhase"]
+
+    if phase == "REALTIME":
+        return advance_bm(room_id)
+
+    if phase == "ID_ROUNDS":
+        # Advance within ID sub-rounds (gate closure batches)
+        snap = _snapshot(rs)
+        result: dict[str, Any] = {"day": snap["day"], "oldPhase": "ID_ROUNDS"}
+
+        sub_result = _advance_id_sub_round(snap)
+        result.update(sub_result)
+
+        if sub_result.get("idRoundsComplete"):
+            # All ID rounds done — run final ID close and transition to REALTIME
+            result.update(_on_id_close(snap))
+
+            snap["dayPhase"] = "REALTIME"
+            snap["currentSp"] = 1
+            snap["bmSubPhase"] = "BM_OPEN"
+            snap["bmOrderBook"] = {}
+            _recompute_niv_for_sp(snap, 1)
+
+            # Mark all SPs as BM_OPEN in timeline
+            for sp in range(1, SPS_PER_DAY + 1):
+                tl = snap.get("spTimeline", {}).get(sp, {})
+                tl["phase"] = "BM_OPEN"
+                tl["bmSubPhase"] = "BM_OPEN"
+
+            result["newPhase"] = "REALTIME"
+            result["currentSp"] = 1
+
+        snap["phaseStartTs"] = int(time.time() * 1000)
+        snap["playerReady"] = {}
+        _apply_phase_tick(snap)
+
+        _room_states[room_id] = snap
+        result["dayPhase"] = snap["dayPhase"]
+        result["currentSp"] = snap["currentSp"]
+        result["bmSubPhase"] = snap["bmSubPhase"]
+        return result
+
+    # All other day-level phases
+    return advance_day_phase(room_id)
 
 
 # ═══════════════════════════════════════════════

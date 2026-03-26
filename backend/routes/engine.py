@@ -75,6 +75,11 @@ async def engine_advance_bm(room_id: str, data: Optional[Dict[str, Any]] = None)
     return await _run(room_id, "advance_bm", data)
 
 
+@router.post("/{room_id}/engine/advance-game")
+async def engine_advance_game(room_id: str, data: Optional[Dict[str, Any]] = None):
+    return await _run(room_id, "advance_game", data)
+
+
 # ── clearing ────────────────────────────────────────────────────────────
 
 @router.post("/{room_id}/engine/clear-bm")

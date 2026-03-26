@@ -26,12 +26,12 @@ export default function LobbyScreen({ name, setName, room, setRoom, ready, onNex
             <p style={{ margin: "0 0 12px 0", color: "#cbd5e1", fontSize: 14, lineHeight: 1.6 }}>Experience the intense pressure of the GB Balancing Mechanism. Trade energy, manage physical assets, and keep the frequency stable in a real-time multiplayer simulation.</p>
             <div style={{ display: "flex", gap: 16, marginTop: 24 }}>
               <div style={{ flex: 1 }}>
-                <div style={{ color: "#1de98b", fontSize: 24, fontWeight: 900, fontFamily: "'JetBrains Mono'" }}>09</div>
+                <div style={{ color: "#1de98b", fontSize: 24, fontWeight: 900, fontFamily: "'JetBrains Mono'" }}>08</div>
                 <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: 1 }}>Distinct Roles</div>
               </div>
               <div style={{ flex: 1 }}>
-                <div style={{ color: "#f5b222", fontSize: 24, fontWeight: 900, fontFamily: "'JetBrains Mono'" }}>3</div>
-                <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: 1 }}>Market Phases</div>
+                <div style={{ color: "#f5b222", fontSize: 24, fontWeight: 900, fontFamily: "'JetBrains Mono'" }}>5</div>
+                <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: 1 }}>Market Types</div>
               </div>
               <div style={{ flex: 1 }}>
                 <div style={{ color: "#38bdf8", fontSize: 24, fontWeight: 900, fontFamily: "'JetBrains Mono'" }}>100%</div>

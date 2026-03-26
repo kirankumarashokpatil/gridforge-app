@@ -174,7 +174,7 @@ export default function ForecastPanel({ sp, tickSpeed, publishedForecast, isInst
                         onClick={mode === 'manual'
                             ? () => setDraft({ demand: new Array(48).fill(0), wind: new Array(48).fill(0), solar: new Array(48).fill(0) })
                             : handleAutoGenerate}
-                        disabled={false}
+                        disabled={!canEdit || isPublishing}
                         style={{ ...s.btn(false), marginLeft: mode === 'manual' ? "auto" : 8, alignSelf: "flex-end" }}>
                         {mode === 'manual' ? "Clear" : "Generate Auto"}
                     </button>

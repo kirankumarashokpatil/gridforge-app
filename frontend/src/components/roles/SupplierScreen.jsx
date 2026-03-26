@@ -49,7 +49,7 @@ export default function SupplierScreen(props) {
     const sup = SUPPLIERS[supplierKey] || SUPPLIERS.BRITISH_GAS;
 
     const isPreRealtimePhase = ["FORECAST", "FORECAST_0", "FORECAST_1", "FORECAST_2", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(phase);
-    const isForecastRevealPhase = ["FORECAST", "FORECAST_0", "FORECAST_1", "FORECAST_2", "DA", "IDA1", "IDA2", "ID", "ID_ROUNDS"].includes(phase);
+    const isForecastRevealPhase = ["FORECAST", "FORECAST_0", "FORECAST_1", "FORECAST_2"].includes(phase);
     const currentMkt = isPreRealtimePhase ? market?.forecast : market?.actual;
     const sbp = currentMkt?.sbp || 50;
     const ssp = currentMkt?.ssp || 50;

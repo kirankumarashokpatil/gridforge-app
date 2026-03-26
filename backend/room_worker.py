@@ -310,7 +310,10 @@ class RoomWorker:
             except Exception:
                 pass
 
-            return CommandResult(result=result, broadcasts=broadcasts)
+            return CommandResult(
+                result={**result, "dayPhase": rs["dayPhase"], "currentSp": rs["currentSp"], "bmSubPhase": rs["bmSubPhase"], "phaseStartTs": now_ts},
+                broadcasts=broadcasts,
+            )
 
     # ── advance BM (within REALTIME) ────────────────────────────────────
 
@@ -415,7 +418,165 @@ class RoomWorker:
                 except Exception:
                     pass
 
-            return CommandResult(result=result, broadcasts=broadcasts)
+            return CommandResult(
+                result={**result, "dayPhase": rs["dayPhase"], "currentSp": rs["currentSp"], "bmSubPhase": rs["bmSubPhase"], "phaseStartTs": now_ts},
+                broadcasts=broadcasts,
+            )
+
+    # ── unified advance (routes internally) ─────────────────────────────
+
+    async def _cmd_advance_game(self, room_id: str, data: dict) -> CommandResult:
+        """Unified advance — single entry point for NESO / Instructor clicks.
+
+        Routes to the correct handler:
+          - REALTIME → advance_bm
+          - ID_ROUNDS → gate-closure sub-round (then REALTIME)
+          - All other day phases → advance_day_phase
+        """
+        lock = self._get_advance_lock(room_id)
+        async with lock:
+            rs = game_loop._get_room(room_id)
+            err = self._validate_precondition(rs, data)
+            if err:
+                return CommandResult(error=err, status_code=409)
+
+            phase_before = rs.get("dayPhase")
+
+            # Reload ID bids if we're about to close an ID round
+            if phase_before == "ID_ROUNDS":
+                try:
+                    id_rows = await db.query(
+                        "SELECT player_id, sp, side, mw, price FROM id_bids WHERE room_id = $1",
+                        room_id,
+                    )
+                    orders_by_player: dict = {}
+                    for row in id_rows:
+                        pid = row["player_id"]
+                        orders_by_player.setdefault(pid, []).append(
+                            {
+                                "sp": row["sp"],
+                                "side": row["side"],
+                                "mw": float(row["mw"]),
+                                "price": float(row["price"]),
+                            }
+                        )
+                    for pid, orders in orders_by_player.items():
+                        game_loop.submit_id_orders(room_id, pid, orders)
+                except Exception:
+                    pass  # table may not exist yet
+
+            result = game_loop.advance_game(room_id)
+            now_ts = int(datetime.now().timestamp() * 1000)
+            rs = game_loop._get_room(room_id)
+
+            # Flush event log
+            pending = list(rs.get("_pendingEvents", []))
+            rs["_pendingEvents"] = []
+            asyncio.ensure_future(flush_events(room_id, pending))
+
+            db_sp = max(1, rs["currentSp"])
+            await db.execute(
+                "UPDATE rooms SET phase = $1, sp = $2, phase_start_ts = $3, last_active = CURRENT_TIMESTAMP WHERE room_id = $4",
+                rs["dayPhase"],
+                db_sp,
+                now_ts,
+                room_id,
+            )
+
+            # Build broadcast payload
+            fus = result.get("forecastUpdateSummary")
+            pf = game_loop.get_room_state(room_id).get("publishedForecast")
+            current_sp = max(1, rs["currentSp"])
+            current_market = rs["markets"].get(current_sp)
+            settlement_map = result.get("settlement") or {}
+
+            # Per-player state updates (for BM settlement broadcasting)
+            player_updates: dict = {}
+            for pid, ps in rs["playerStates"].items():
+                sp_settle = settlement_map.get(pid) or {}
+                player_updates[pid] = {
+                    "cash": ps.get("cash", 0),
+                    "daCash": ps.get("daCash", 0),
+                    "soc": ps.get("soc", 50),
+                    "roleScore": ps.get("roleScore"),
+                    "systemScore": ps.get("systemScore"),
+                    "overallScore": ps.get("overallScore"),
+                    "deviation": sp_settle.get("deviation"),
+                    "imbalancePenalty": sp_settle.get("imbalancePenalty"),
+                    "cashDelta": sp_settle.get("cashDelta"),
+                    "bsuosCharge": sp_settle.get("bsuosCharge"),
+                    "bmAccMw": sp_settle.get("bmAccMw"),
+                    "contractPosMw": sp_settle.get("contractPosMw"),
+                    "actualPhysical": sp_settle.get("actualPhysical"),
+                }
+
+            broadcast_data = {
+                **result,
+                "dayPhase": rs["dayPhase"],
+                "currentSp": rs["currentSp"],
+                "bmSubPhase": rs["bmSubPhase"],
+                "phaseStartTs": now_ts,
+                "tickSpeed": rs.get("tickSpeed"),
+                "forecastUpdateSummary": fus,
+                "publishedForecast": pf,
+                "currentMarket": current_market,
+                "phaseInfo": GB_PHASE_TABLE.get(rs["dayPhase"]),
+                "playerUpdates": player_updates,
+                "spTimeline": rs.get("spTimeline", {}),
+                "idRound": rs.get("idRound", 0),
+            }
+            if result.get("marketsGenerated") or result.get("marketsUpdated"):
+                broadcast_data["markets"] = rs["markets"]
+
+            # Use day_phase_change for day-level, bm_advance for REALTIME
+            if rs["dayPhase"] == "REALTIME" and phase_before == "REALTIME":
+                bcast_type = "bm_advance"
+            else:
+                bcast_type = "day_phase_change"
+
+            broadcasts = [{"type": bcast_type, "data": broadcast_data}]
+
+            if settlement_map:
+                broadcasts.append(
+                    {"type": "server_settlement", "sp": result.get("sp"), "data": settlement_map}
+                )
+
+            # Leaderboard on day-level changes
+            if bcast_type == "day_phase_change":
+                try:
+                    players_rows = await db.query(
+                        "SELECT * FROM players WHERE room_id = $1", room_id
+                    )
+                    lb_players = [
+                        {
+                            "id": dict(r)["player_id"],
+                            "name": dict(r).get("name", ""),
+                            "role": dict(r).get("role", ""),
+                            "roleScore": dict(r).get("role_score") or 0,
+                            "systemScore": dict(r).get("system_score") or 0,
+                            "overallScore": dict(r).get("overall_score") or 0,
+                            "cash": dict(r).get("cash") or 0,
+                        }
+                        for r in players_rows
+                    ]
+                    lb = build_leaderboard(lb_players)
+                    broadcasts.append({"type": "leaderboard", "data": lb})
+                except Exception:
+                    pass
+
+            return CommandResult(
+                result={
+                    **result,
+                    "dayPhase": rs["dayPhase"],
+                    "currentSp": rs["currentSp"],
+                    "bmSubPhase": rs["bmSubPhase"],
+                    "phaseStartTs": now_ts,
+                    "tickSpeed": rs.get("tickSpeed"),
+                    "spTimeline": rs.get("spTimeline", {}),
+                    "idRound": rs.get("idRound", 0),
+                },
+                broadcasts=broadcasts,
+            )
 
     # ── BM clearing ─────────────────────────────────────────────────────
 

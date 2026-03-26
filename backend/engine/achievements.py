@@ -105,6 +105,9 @@ def check_achievements(stats: dict, already_earned: list[str]) -> list[dict]:
         try:
             if a["check"](stats):
                 newly_earned.append(a)
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Achievement check %s failed: %s", a["id"], exc
+            )
     return newly_earned

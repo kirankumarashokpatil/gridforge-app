@@ -3,7 +3,7 @@ import SharedLayout from './SharedLayout';
 import ForecastPanel from './ForecastPanel';
 import MarketOverviewPanel from '../shared/MarketOverviewPanel';
 import EventFeed from '../shared/EventFeed';
-import { EVENTS, SYSTEM_PARAMS, FREQ_FAIL_LO, FREQ_FAIL_HI } from '../../shared/constants';
+import { EVENTS, SYSTEM_PARAMS, FREQ_FAIL_LO, FREQ_FAIL_HI, SIM_SPEEDS } from '../../shared/constants';
 import { ComposableMap, Geographies, Geography, Marker, Line } from 'react-simple-maps';
 
 const f0 = p => Number(p).toLocaleString(undefined, { maximumFractionDigits: 0 });
@@ -177,7 +177,10 @@ export default function NESOScreen(props) {
         leaderboard = [], spHistory = [], allBids = [], players = [],
         onNextPhase, onExecuteEvent, onPauseToggle, paused, freqBreachSec,
         lastRes, daOrderBook, daResult, idOrderBook, spContracts, currentSp, simRes, ready,
-        playerReadiness = {}
+        playerReadiness = {},
+        advanceMode = "AUTO", simSpeedId = "NORMAL",
+        onAdvanceModeChange, onSimSpeedChange,
+        liveNivData,
     } = props;
 
     const [selectedEvent, setSelectedEvent] = useState(null);
@@ -318,17 +321,18 @@ export default function NESOScreen(props) {
     // ── Pre-game Validation (SP 0) ───────────────────────────────────────────
     const isPreGame = sp === 0;
     const playersArr = Array.isArray(players) ? players : Object.values(players);
-    // Only consider players who have had their role confirmed (lastSeen > 0 means they've
-    // sent at least one keepalive / PUT, so the role assignment is no longer stale).
-    const activePlayers = playersArr.filter(p => p.lastSeen > 0 || p.status === "ACTIVE");
+    // Include players who are active (lastSeen > 0 or status ACTIVE) or have a confirmed role.
+    const activePlayers = playersArr.filter(p => p.lastSeen > 0 || p.status === "ACTIVE" || (p.role && p.role !== "UNASSIGNED"));
     const hasGenerator = activePlayers.some(p => p.role === "GENERATOR");
     const hasSupplier = activePlayers.some(p => p.role === "SUPPLIER");
     const canStart = !isPreGame || (hasGenerator && hasSupplier);
 
     // ── Top Right ────────────────────────────────────────────────────────────
     const readinessEntries = playerReadiness?.readiness ? Object.entries(playerReadiness.readiness) : [];
+    const isManual = advanceMode === "MANUAL";
     const topRight = (
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            {/* Readiness panel */}
             {!isPreGame && readinessEntries.length > 0 && (
                 <div style={{
                     display: "flex", flexDirection: "column", gap: 3, padding: "4px 8px",
@@ -358,6 +362,51 @@ export default function NESOScreen(props) {
                     <span style={{ color: "#f5b222" }}>Need 1 Generator & 1 Supplier</span>
                 </div>
             )}
+
+            {/* Advance Mode toggle: MANUAL / AUTO */}
+            {!isPreGame && (
+                <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: "1px solid #1a3045" }}>
+                    <button
+                        onClick={() => onAdvanceModeChange?.("MANUAL")}
+                        style={{
+                            padding: "4px 8px", fontSize: 9, fontWeight: 800, cursor: "pointer",
+                            fontFamily: "'Outfit'", border: "none",
+                            background: isManual ? "#f5b222" : "#0c1c2a",
+                            color: isManual ? "#050e16" : "#4d7a96",
+                        }}>
+                        🖱️ Manual
+                    </button>
+                    <button
+                        onClick={() => onAdvanceModeChange?.("AUTO")}
+                        style={{
+                            padding: "4px 8px", fontSize: 9, fontWeight: 800, cursor: "pointer",
+                            fontFamily: "'Outfit'", border: "none",
+                            background: !isManual ? "#38c0fc" : "#0c1c2a",
+                            color: !isManual ? "#050e16" : "#4d7a96",
+                        }}>
+                        ⏱️ Auto
+                    </button>
+                </div>
+            )}
+
+            {/* Sim Speed selector (AUTO mode only) */}
+            {!isPreGame && !isManual && (
+                <select
+                    value={simSpeedId}
+                    onChange={e => onSimSpeedChange?.(e.target.value)}
+                    style={{
+                        padding: "4px 6px", fontSize: 9, fontWeight: 700,
+                        fontFamily: "'Outfit'", borderRadius: 6,
+                        background: "#0c1c2a", color: "#38c0fc",
+                        border: "1px solid #1a3045", cursor: "pointer",
+                    }}>
+                    {Object.values(SIM_SPEEDS).map(s => (
+                        <option key={s.id} value={s.id}>{s.emoji} {s.label}</option>
+                    ))}
+                </select>
+            )}
+
+            {/* Advance Phase button */}
             <button
                 onClick={onNextPhase}
                 disabled={!canStart}
@@ -371,12 +420,21 @@ export default function NESOScreen(props) {
                     fontSize: 11,
                     cursor: canStart ? "pointer" : "not-allowed",
                     fontFamily: "'Outfit'",
-                    opacity: canStart ? 1 : 0.7
+                    opacity: canStart ? 1 : 0.7,
+                    whiteSpace: "nowrap",
                 }}>
                 {isPreGame ? "🚀 START SIMULATION" : "⏭ ADVANCE PHASE →"}
             </button>
-            <button onClick={onPauseToggle} style={{ padding: "6px 12px", background: paused ? "#1a0e05" : "#071f13", border: `1px solid ${paused ? "#f5b222" : "#1de98b"}`, borderRadius: 6, color: paused ? "#f5b222" : "#1de98b", fontWeight: 800, fontSize: 11, cursor: "pointer", fontFamily: "'Outfit'" }}>
-                {paused ? "▶ RESUME" : "⏸ FREEZE & EXPLAIN"}
+
+            {/* Pause / Resume */}
+            <button onClick={onPauseToggle} style={{
+                padding: "6px 12px", borderRadius: 6, fontWeight: 800, fontSize: 11, cursor: "pointer",
+                fontFamily: "'Outfit'", whiteSpace: "nowrap",
+                background: paused ? "#1a0e05" : "#071f13",
+                border: `1px solid ${paused ? "#f5b222" : "#1de98b"}`,
+                color: paused ? "#f5b222" : "#1de98b",
+            }}>
+                {paused ? "▶ RESUME" : "⏸ FREEZE"}
             </button>
         </div>
     );
@@ -689,8 +747,44 @@ export default function NESOScreen(props) {
                             </div>
                         </div>
                     </div>
+
+                    {/* Live BM coverage during BM_OPEN */}
+                    {liveNivData && phase === "REALTIME" && (
+                        <div style={{ marginTop: 8, padding: "6px 8px", background: "#0c1c2a", border: "1px solid #1e4a7a", borderRadius: 4 }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                                <span style={{ fontSize: 9, color: "#38c0fc", fontWeight: 700, letterSpacing: "0.05em" }}>LIVE BM COVERAGE</span>
+                                <span style={{ fontSize: 9, color: liveNivData.coverage >= 1 ? "#22c55e" : liveNivData.coverage >= 0.5 ? "#eab308" : "#f97316", fontWeight: 700 }}>
+                                    {Math.round(liveNivData.coverage * 100)}%
+                                </span>
+                            </div>
+                            <div style={{ height: 6, background: "#0f2a4a", borderRadius: 3, overflow: "hidden", marginBottom: 4 }}>
+                                <div style={{
+                                    height: "100%",
+                                    width: `${Math.min(100, liveNivData.coverage * 100)}%`,
+                                    background: liveNivData.coverage >= 1 ? "#22c55e" : liveNivData.coverage >= 0.5 ? "#eab308" : "#f97316",
+                                    borderRadius: 3,
+                                    transition: "width 0.5s ease",
+                                }} />
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4, fontSize: 9 }}>
+                                <div>
+                                    <div style={{ color: "#4d7a96" }}>Residual</div>
+                                    <div style={{ color: "#ddeeff", fontFamily: "'JetBrains Mono'" }}>{f0(liveNivData.indicativeResidual)} MW</div>
+                                </div>
+                                <div>
+                                    <div style={{ color: "#4d7a96" }}>Bid Vol</div>
+                                    <div style={{ color: "#ddeeff", fontFamily: "'JetBrains Mono'" }}>{f0(liveNivData.totalBidMw)} MW</div>
+                                </div>
+                                <div>
+                                    <div style={{ color: "#4d7a96" }}>Bids</div>
+                                    <div style={{ color: "#ddeeff", fontFamily: "'JetBrains Mono'" }}>{liveNivData.bidCount}</div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     <div style={{ fontSize: 9, color: "#4d7a96", marginTop: 6 }}>
-                        NIV is an outcome of imbalance and accepted BM actions, not a manual control.
+                        NIV = System Noise − Player Positions. Cleared by merit-order BM actions.
                     </div>
                 </div>
 

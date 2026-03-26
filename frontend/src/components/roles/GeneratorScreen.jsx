@@ -18,7 +18,7 @@ export default function GeneratorScreen(props) {
         daMyBid, setDaMyBid, daSubmitted, onDaSubmit,
         idMyOrder, setIdMyOrder, idSubmitted, onIdSubmit,
         spContracts, pid, spHistory, allBids, contractPosition, cash, daCash,
-        physicalState, // New
+        physicalState, setPhysicalState, // New
         daCurveSegments, onDaCurveSubmit, daAuctionResults, forecasts,
         positions, daPositions
     } = props;

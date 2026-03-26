@@ -59,6 +59,41 @@ TICK_SPEEDS = {
     "TURBO": {"id": "TURBO", "ms": 5000, "label": "Turbo (5s)"},
 }
 
+# ─── PER-PHASE TICK DURATIONS (ms) ───
+# Overrides the room-level tickSpeed when the engine enters each phase.
+# Forecast phases are quick (players just read); trading phases give more
+# time for bids; BM per-SP ticks are short to keep REALTIME snappy.
+# A multiplier is applied to the room's TICK_SPEED preset, so Instructor
+# speed selection (SLOW / NORMAL / FAST / TURBO) still scales everything.
+PHASE_DURATIONS = {
+    "FORECAST_0": 10_000,   # 10s — read initial forecast
+    "DA":         30_000,   # 30s — submit DA bids/curves
+    "FORECAST_1": 10_000,   # 10s — read revised forecast
+    "IDA1":       25_000,   # 25s — adjust positions
+    "FORECAST_2":  8_000,   #  8s — final forecast update
+    "IDA2":       25_000,   # 25s — near-delivery auction
+    "ID_ROUNDS":  20_000,   # 20s per ID sub-round
+    "BM_OPEN":    15_000,   # 15s — submit BM bids
+    "BM_CLEAR":    5_000,   #  5s — view clearing result
+    "SP_SETTLED":  5_000,   #  5s — settlement display
+    "RESULTS":    20_000,   # 20s — review scores
+}
+
+# ─── ADVANCE MODES ───
+# "MANUAL" — NESO/Instructor clicks button to advance each phase (no auto timer)
+# "AUTO"   — Timer auto-advances phases based on PHASE_DURATIONS × simSpeedFactor
+ADVANCE_MODES = ("MANUAL", "AUTO")
+
+# ─── SIM-TIME SPEED PRESETS (AUTO mode only) ───
+# factor: multiplier on PHASE_DURATIONS base tick. Lower = faster.
+SIM_SPEEDS = {
+    "REALTIME": {"id": "REALTIME", "factor": 1.0,  "label": "30min = 30s"},
+    "RELAXED":  {"id": "RELAXED",  "factor": 0.5,  "label": "30min = 15s"},
+    "NORMAL":   {"id": "NORMAL",   "factor": 0.33, "label": "30min = 10s"},
+    "FAST":     {"id": "FAST",     "factor": 0.17, "label": "30min = 5s"},
+    "TURBO":    {"id": "TURBO",    "factor": 0.07, "label": "30min = 2s"},
+}
+
 # ─── FORGIVENESS MODE ───
 FORGIVENESS = {
     "penaltyMultiplier": 0.25,

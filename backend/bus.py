@@ -229,6 +229,8 @@ class RedisBus(MessageBus):
         resp_key = f"{self.RESP_PREFIX}{request_id}"
         resp_raw = await self._redis.brpop(resp_key, timeout=self.cmd_timeout)
         if resp_raw is None:
+            # Clean up stale response key to prevent Redis key accumulation
+            await self._redis.delete(resp_key)
             return CommandResult(error="Worker timeout", status_code=504)
 
         return CommandResult.from_dict(json.loads(resp_raw[1]))

@@ -88,6 +88,41 @@ export const TICK_SPEEDS = {
     TURBO: { id: "TURBO", ms: 5000, label: "Turbo (5s)", emoji: "🚀", desc: "Expert mode — maximum intensity" },
 };
 
+// ─── ADVANCE MODES ───
+// MANUAL: NESO clicks to advance each phase (no timer auto-advance)
+// AUTO:   Timer-driven — each phase auto-advances after its SIM_SPEED duration
+export const ADVANCE_MODES = {
+    MANUAL: { id: "MANUAL", label: "Manual", emoji: "🖱️", desc: "Click to advance each phase" },
+    AUTO: { id: "AUTO", label: "Automatic", emoji: "⏱️", desc: "Timer auto-advances phases" },
+};
+
+// ─── SIM-TIME SPEED PRESETS (AUTO mode only) ───
+// Maps 30 sim-minutes (1 phase tick) to real-world seconds.
+// Phase durations are multiplied by this factor.
+export const SIM_SPEEDS = {
+    REALTIME: { id: "REALTIME", factor: 1.0, label: "30min = 30s", emoji: "🐌", desc: "Near real-time pace" },
+    RELAXED:  { id: "RELAXED",  factor: 0.5, label: "30min = 15s", emoji: "🐢", desc: "Relaxed workshop pace" },
+    NORMAL:   { id: "NORMAL",   factor: 0.33, label: "30min = 10s", emoji: "⚡", desc: "Standard workshop" },
+    FAST:     { id: "FAST",     factor: 0.17, label: "30min = 5s",  emoji: "🏃", desc: "Fast-paced workshop" },
+    TURBO:    { id: "TURBO",    factor: 0.07, label: "30min = 2s",  emoji: "🚀", desc: "Speed-run demo" },
+};
+
+// ─── PER-PHASE TICK DURATIONS (ms) ───
+// Server overrides tickSpeed per-phase; these are reference values for UI display.
+export const PHASE_DURATIONS = {
+    FORECAST_0: 10000,
+    DA:         30000,
+    FORECAST_1: 10000,
+    IDA1:       25000,
+    FORECAST_2:  8000,
+    IDA2:       25000,
+    ID_ROUNDS:  20000,
+    BM_OPEN:    15000,
+    BM_CLEAR:    5000,
+    SP_SETTLED:  5000,
+    RESULTS:    20000,
+};
+
 // ─── FORGIVENESS MODE (Appendix D.1) ───
 export const FORGIVENESS = {
     penaltyMultiplier: 0.25,       // imbalance penalties × 0.25 in tutorial

@@ -14,6 +14,7 @@ from ws import manager
 from engine import game_loop
 from engine.asset_physics import avail_mw
 from engine.constants import ASSETS
+from engine.market_engine import compute_indicative_residual
 
 router = APIRouter(prefix="/api/rooms", tags=["bids"])
 
@@ -199,7 +200,31 @@ async def put_bm_bid(room_id: str, sp: int, player_id: str, bid: Dict[str, Any])
             bid.get("isBot", False)
         )
 
+        # Also update in-memory order book for live NIV + BM clearing
+        game_loop.submit_bm_bid(room_id, player_id, bid)
+
+        # Compute indicative residual for live NIV display
+        rs = game_loop._get_room(room_id)
+        market = rs.get("markets", {}).get(sp, {})
+        actual = market.get("actual", {})
+        raw_niv = float(actual.get("rawImbalanceMw", actual.get("niv", 0)))
+        is_short = actual.get("isShort", False)
+        all_bids = list(rs.get("bmOrderBook", {}).values())
+        indic = compute_indicative_residual(raw_niv, is_short, all_bids)
+
         await manager.broadcast_to_room(room_id, {"type": "bm_bid", "sp": sp, "data": bid})
+        # Separate broadcast for live NIV (picked up by meta channel subscribers)
+        await manager.broadcast_to_room(room_id, {
+            "type": "bm_niv_update", "sp": sp,
+            "data": {
+                "indicativeResidual": indic["residual"],
+                "coverage": indic["coverage"],
+                "totalBidMw": indic["totalBidMw"],
+                "bidCount": indic["bidCount"],
+                "rawNiv": raw_niv,
+                "isShort": is_short,
+            },
+        })
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

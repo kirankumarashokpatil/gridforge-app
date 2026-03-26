@@ -48,6 +48,7 @@ export function useApi() {
 
       const typeMap = {
         'bm_bid': 'bm', 'bm_clear': 'bm', 'bm_advance': 'meta',
+        'bm_niv_update': 'bm_niv_update',
         'da_bid': 'da', 'da_clear': 'da',
         'da_curve': 'da_curves', 'da_curve_clear': 'da_curves',
         'id_bid': 'id', 'id_clear': 'id',
@@ -193,6 +194,7 @@ export function useApi() {
     engineAdvancePhase: (roomId) => api('POST', `/api/rooms/${roomId}/engine/advance`),
     engineAdvanceDayPhase: (roomId, data) => api('POST', `/api/rooms/${roomId}/engine/advance-day`, data || {}),
     engineAdvanceBm: (roomId, data) => api('POST', `/api/rooms/${roomId}/engine/advance-bm`, data || {}),
+    engineAdvanceGame: (roomId, data) => api('POST', `/api/rooms/${roomId}/engine/advance-game`, data || {}),
     engineClearBM: (roomId) => api('POST', `/api/rooms/${roomId}/engine/clear-bm`),
     engineClearDA: (roomId) => api('POST', `/api/rooms/${roomId}/engine/clear-da`),
     engineClearDACurves: (roomId) => api('POST', `/api/rooms/${roomId}/engine/clear-da-curves`),

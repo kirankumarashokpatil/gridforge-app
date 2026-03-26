@@ -137,8 +137,10 @@ def market_for_sp(
     expected_price_nl = (expected_ref_price * 0.95) + (r() * 20 - 10)
     expected_price_dk = (30 + (1 - expected_wind) * 60 + (r() * 10)) * sc["priceMod"]
 
-    niv_val = clamp(base_niv, -620, 620)
-    is_short_val = base_niv < 0
+    # Use compute_niv() — at forecast time, no player positions yet
+    niv_result = compute_niv(forecast_system, base_niv, {}, sp)
+    niv_val = niv_result["niv"]
+    is_short_val = niv_result["isShort"]
 
     forecast = {
         "sp": sp,
@@ -147,6 +149,7 @@ def market_for_sp(
         "indicativeNiv": niv_val,
         "rawImbalanceMw": niv_val,
         "isShort": is_short_val,
+        "baseNoise": base_niv,
         "wf": expected_wind,
         "sf": expected_solar,
         "sbp": clamp(expected_ref_price * 1.32 if is_short_val else expected_ref_price * 0.82, 10, 900),
@@ -193,8 +196,11 @@ def market_for_sp(
     true_wind = _wind_fraction_from_speed(mod_wind_speed)
     true_solar = clamp(true_irr + solar_error, 0, 1)
 
-    true_niv = clamp(base_niv + demand_error_mv + (event["niv"] if event else 0), -620, 620)
-    true_is_short = true_niv < 0
+    # Actual base noise includes demand error + event shift
+    actual_base_noise = base_niv + demand_error_mv + (event["niv"] if event else 0)
+    actual_niv_result = compute_niv(forecast_system, actual_base_noise, {}, sp)
+    true_niv = actual_niv_result["niv"]
+    true_is_short = actual_niv_result["isShort"]
     true_ref_price = expected_ref_price + (event["pd"] if event else 0) + (25 if true_is_short else -15)
 
     true_price_fr = expected_price_fr + (err_rng() * 12 - 6)
@@ -215,6 +221,7 @@ def market_for_sp(
         "indicativeNiv": true_niv,
         "rawImbalanceMw": true_niv,
         "isShort": true_is_short,
+        "baseNoise": actual_base_noise,
         "wf": true_wind,
         "sf": true_solar,
         "sbp": clamp(true_ref_price * 1.32 if true_is_short else true_ref_price * 0.82, 10, 900),
@@ -281,6 +288,127 @@ def _generate_trips(r, event_id: str) -> list[str]:
     if event_id == "CASCADE":
         trips.append(candidates[int(r() * len(candidates)) % len(candidates)])
     return trips
+
+
+# ─── NIV Computation (GB formula) ───
+
+def compute_niv(
+    forecast_system: dict,
+    base_noise: float,
+    positions: dict,
+    sp: int,
+) -> dict:
+    """
+    Compute Net Imbalance Volume using the real GB formula (hybrid).
+
+    Real GB: NIV = Forecast Demand − Forecast RES − Σ Contracted Positions
+    Hybrid:  NIV = base_noise − Σ player_positions_for_sp
+      where base_noise encodes system-level demand/RES/fleet forecast error
+      (keeps game balance for small player counts vs 35 GW system).
+
+    Args:
+        forecast_system: dict with demandMw, windMw, solarMw fields.
+        base_noise: Pre-computed system imbalance noise (MW).
+        positions: {pid: {sp: float}} — all player contracted positions.
+        sp: Settlement period number (1-48).
+    Returns:
+        dict with niv, isShort, demandMw, windMw, solarMw, resMw,
+        totalPositionsMw, baseNoise.
+    """
+    demand_mw = forecast_system.get("demandMw", 0)
+    wind_mw = forecast_system.get("windMw", 0)
+    solar_mw = forecast_system.get("solarMw", 0)
+    res_mw = wind_mw + solar_mw
+
+    total_positions = sum(
+        player_pos.get(sp, 0) for player_pos in positions.values()
+    )
+
+    niv = base_noise - total_positions
+    niv = clamp(niv, -620, 620)
+
+    return {
+        "niv": niv,
+        "isShort": niv < 0,
+        "demandMw": demand_mw,
+        "windMw": wind_mw,
+        "solarMw": solar_mw,
+        "resMw": res_mw,
+        "totalPositionsMw": total_positions,
+        "baseNoise": base_noise,
+    }
+
+
+def compute_indicative_residual(
+    raw_niv: float,
+    is_short: bool,
+    bids: list[dict],
+) -> dict:
+    """
+    Compute the indicative residual imbalance from submitted BM bids.
+
+    During BM_OPEN, as bids arrive, we can estimate how much of the
+    imbalance is covered by the submitted bid volume on the correct side.
+
+    Args:
+        raw_niv: The raw NIV before BM clearing (MW).
+        is_short: True if system is short (needs offers).
+        bids: list of bid dicts with "side" and "mw" keys.
+    Returns:
+        dict with residual (MW remaining), coverage (0-1 fraction),
+        totalBidMw, bidCount.
+    """
+    side = "offer" if is_short else "bid"
+    matching = [b for b in bids if b.get("side") == side and float(b.get("mw", 0)) > 0]
+    total_bid_mw = sum(float(b.get("mw", 0)) for b in matching)
+    abs_niv = abs(raw_niv)
+    if abs_niv < 0.01:
+        return {"residual": 0.0, "coverage": 1.0, "totalBidMw": round(total_bid_mw, 1), "bidCount": len(matching)}
+    residual = max(0, abs_niv - total_bid_mw)
+    coverage = min(1.0, total_bid_mw / abs_niv)
+
+    return {
+        "residual": round(residual, 1),
+        "coverage": round(coverage, 3),
+        "totalBidMw": round(total_bid_mw, 1),
+        "bidCount": len(matching),
+    }
+
+
+def compute_system_price(
+    accepted: list[dict],
+    is_short: bool,
+    fallback_sbp: float,
+    fallback_ssp: float,
+) -> dict:
+    """
+    Compute SBP/SSP using volume-weighted average of accepted BM actions
+    (real GB P305 methodology).
+
+    When SHORT: SBP = Σ(price_i × mwAcc_i) / Σ(mwAcc_i) for accepted offers
+                SSP derived as fraction of SBP
+    When LONG:  SSP = Σ(price_i × mwAcc_i) / Σ(mwAcc_i) for accepted bids
+                SBP derived as multiple of SSP
+
+    Falls back to pre-BM reference prices when no actions accepted.
+    """
+    if not accepted:
+        return {"sbp": fallback_sbp, "ssp": fallback_ssp}
+
+    total_mw = sum(float(a.get("mwAcc", 0)) for a in accepted)
+    if total_mw <= 0:
+        return {"sbp": fallback_sbp, "ssp": fallback_ssp}
+
+    vwap = sum(float(a.get("price", 0)) * float(a.get("mwAcc", 0)) for a in accepted) / total_mw
+
+    if is_short:
+        sbp = clamp(vwap, 10, 900)
+        ssp = clamp(vwap * 0.85, 5, 800)
+    else:
+        ssp = clamp(vwap, 5, 800)
+        sbp = clamp(vwap * 1.15, 10, 900)
+
+    return {"sbp": round(sbp, 2), "ssp": round(ssp, 2)}
 
 
 # ─── Clear Balancing Mechanism ───
@@ -665,23 +793,19 @@ def feedback_market_state(market: dict, clear_result: dict) -> dict:
     freq_rng = _rng((market.get("sp", 1)) * 42 + 7)
     freq = clamp(50 + freq_deviation * (0.5 + freq_rng() * 1.0), 49.3, 50.7)
 
-    # Post-P305 / PAR-style: imbalance price = marginal BM action cost
-    # When short: SBP driven by marginal offer price; SSP stays near base
-    # When long:  SSP driven by marginal bid price; SBP stays near base
-    if is_short:
-        sbp = cp_val if clear_result.get("full") else max(cp_val, base_ref * 1.3)
-        ssp = min(cp_val * 0.85, base_ref * 0.9)
-    else:
-        ssp = cp_val if clear_result.get("full") else min(cp_val, base_ref * 0.7)
-        sbp = max(cp_val * 1.15, base_ref * 1.1)
+    # Post-P305: Volume-weighted average of accepted BM actions
+    accepted = clear_result.get("accepted", [])
+    fallback_sbp = cp_val if clear_result.get("full") else max(cp_val, base_ref * 1.3) if is_short else max(cp_val * 1.15, base_ref * 1.1)
+    fallback_ssp = min(cp_val * 0.85, base_ref * 0.9) if is_short else (cp_val if clear_result.get("full") else min(cp_val, base_ref * 0.7))
+    prices = compute_system_price(accepted, is_short, fallback_sbp, fallback_ssp)
 
     return {
         **market,
         "freq": freq,
         "niv": cleared_niv,
         "indicativeNiv": raw_imbalance_mw,
-        "sbp": clamp(sbp, 10, 900),
-        "ssp": clamp(ssp, 5, 800),
+        "sbp": clamp(prices["sbp"], 10, 900),
+        "ssp": clamp(prices["ssp"], 5, 800),
         "residualNIV": residual_niv,
     }
 

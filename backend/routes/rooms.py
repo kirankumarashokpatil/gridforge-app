@@ -83,13 +83,22 @@ async def update_room_meta(room_id: str, data: Dict[str, Any]):
                 idx += 1
 
         if not updates:
-            return {"success": True}
+            # Even if no DB columns to update, still sync game state below
+            pass
+        else:
+            updates.append("last_active = CURRENT_TIMESTAMP")
+            values.append(room_id)
+            sql = f"UPDATE rooms SET {', '.join(updates)} WHERE room_id = ${idx}"
+            await db.execute(sql, *values)
 
-        updates.append("last_active = CURRENT_TIMESTAMP")
-        values.append(room_id)
-
-        sql = f"UPDATE rooms SET {', '.join(updates)} WHERE room_id = ${idx}"
-        await db.execute(sql, *values)
+        # Sync config to in-memory game state (paused, advanceMode, simSpeed, tickSpeed)
+        config_keys = {"paused", "tickSpeed", "advanceMode", "simSpeedId", "simSpeedFactor"}
+        game_config = {k: v for k, v in data.items() if k in config_keys}
+        if game_config:
+            game_loop.set_room_config(room_id, game_config)
+            # Include resulting tickSpeed in broadcast so clients stay in sync
+            rs = game_loop._get_room(room_id)
+            data["tickSpeed"] = rs.get("tickSpeed")
 
         await manager.broadcast_to_room(room_id, {"type": "meta", "data": data})
 
