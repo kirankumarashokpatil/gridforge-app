@@ -259,7 +259,7 @@ export const ROLES = {
     ELEXON: {
         id: "ELEXON", name: "Elexon", emoji: "📊",
         desc: "Settlement body — calculate imbalance charges, verify metering, reconcile P&L. WIN: Ensure fair settlement.",
-        canOwnAssets: false, canTrade: false, hasDemand: false, isSettlement: true, isSystem: true,
+        canOwnAssets: false, canTrade: false, hasDemand: false, isSettlement: true,
         hint: "You compute imbalance penalties and settlement reports. Your score reflects accuracy and fairness: all players' cash should sum correctly, with zero 'money creation' errors.",
         guide: "Elexon watches the blockchain of all trades and ensures each player pays/receives the correct amount. Your role is observational. Study the settlement formulas to understand how players earn/lose cash.",
     },
