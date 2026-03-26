@@ -129,6 +129,11 @@ def _new_room_state(seed: int | None = None) -> dict:
         # Built up through: DA → IDA1 → IDA2 → ID_ROUNDS
         "positions": {},             # pid → { sp: float }
 
+        # Snapshot of positions captured immediately after DA clearing.
+        # Preserved so reconnecting clients can restore the "DA CONTRACT" widget
+        # in the ID phase without re-deriving from the combined positions dict.
+        "daPositions": {},           # pid → [48 floats] (0-indexed, signed MW)
+
         # Day-level order books (bids for multiple SPs)
         "daOrderBook": {},           # pid → [ { sp, side, mw, price }, ... ]
         "daCurves": {},              # pid → curve (for clear_full_auction)
@@ -305,6 +310,7 @@ def get_room_state(room_id: str) -> dict:
         "rngSeed": rs.get("rngSeed"),
         "markets": rs["markets"],
         "positions": rs["positions"],
+        "daPositions": rs.get("daPositions", {}),
         "systemState": rs["systemState"],
         "playerStates": rs["playerStates"],
         "playerReady": rs.get("playerReady", {}),
@@ -779,6 +785,14 @@ def _on_da_close_all(rs: dict) -> dict:
             all_results[sp] = {"cp": cp, "volume": total_volume, "accepted_bids": accepted_bids}
 
         rs["daResults"] = all_results
+        # Snapshot signed DA positions (pid → 48-float array) for reconnect restore.
+        da_pos_snap: dict = {}
+        for snap_pid, snap_sps in rs["positions"].items():
+            arr = [0.0] * SPS_PER_DAY
+            for sp_k, mw in snap_sps.items():
+                arr[int(sp_k) - 1] = float(mw)
+            da_pos_snap[snap_pid] = arr
+        rs["daPositions"] = da_pos_snap
         avg_cp = round(sum(v["cp"] for v in all_results.values()) / len(all_results), 2) if all_results else None
         total_vol = sum(v["volume"] for v in all_results.values())
         _emit(
@@ -817,6 +831,14 @@ def _on_da_close_all(rs: dict) -> dict:
         _apply_accepted_to_positions(rs, sp, da_result.get("accepted_bids", []))
 
     rs["daResults"] = all_results
+    # Snapshot signed DA positions (pid → 48-float array) for reconnect restore.
+    da_pos_snap_s: dict = {}
+    for snap_pid, snap_sps in rs["positions"].items():
+        arr = [0.0] * SPS_PER_DAY
+        for sp_k, mw in snap_sps.items():
+            arr[int(sp_k) - 1] = float(mw)
+        da_pos_snap_s[snap_pid] = arr
+    rs["daPositions"] = da_pos_snap_s
     avg_cp = round(sum(v["cp"] for v in all_results.values()) / len(all_results), 2) if all_results else None
     total_vol = sum(v["volume"] for v in all_results.values())
     _emit(
@@ -1338,6 +1360,7 @@ def _start_new_day(rs: dict) -> dict:
     rs["idOrderBook"] = {}
     rs["bmOrderBook"] = {}
     rs["nesoOverrides"] = {}
+    rs["daPositions"] = {}
     rs["daResults"] = {}
     rs["ida1Results"] = {}
     rs["ida2Results"] = {}

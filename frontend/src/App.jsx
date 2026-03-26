@@ -260,7 +260,7 @@ export default function App() {
         if (state.daCash !== undefined) setDaCash(state.daCash);
         if (state.positions) setPositions(state.positions);
         if (state.contracts) setContracts(state.contracts);
-        if (state.daPositions) setDaPositions(state.daPositions);
+        if (state.daPositions?.[id]) setDaPositions(state.daPositions[id]);
         if (state.imbalancePenalty !== undefined) setImbalancePenalty(state.imbalancePenalty);
         if (state.earnedAchievements) setEarnedAchievements(state.earnedAchievements);
         if (state.gameMode) setGameMode(state.gameMode);
@@ -337,10 +337,18 @@ export default function App() {
       // Forecast update bulletin produced by FORECAST_* phase advance
       if (data?.forecastUpdateSummary) setForecastUpdateSummary(data.forecastUpdateSummary);
       if (data?.publishedForecast) setPublishedForecast(data.publishedForecast);
-      // Capture server-authoritative DA results for the phase-transition effect.
+      // Capture server-authoritative DA/IDA results for the phase-transition effect.
       // This prevents the client from re-clearing independently (Bug 3).
+      // IDA1/IDA2 results come back as ida1Results/ida2Results, not daResults —
+      // map all three into the same ref so isAuctionClose handler works uniformly.
       if (data?.daResults && Object.keys(data.daResults).length > 0) {
         lastDaBroadcastRef.current = data.daResults;
+      }
+      if (data?.ida1Results && Object.keys(data.ida1Results).length > 0) {
+        lastDaBroadcastRef.current = data.ida1Results;
+      }
+      if (data?.ida2Results && Object.keys(data.ida2Results).length > 0) {
+        lastDaBroadcastRef.current = data.ida2Results;
       }
       // Phase 3: capture server BM result + per-player settlement from bm_advance broadcast.
       // The phase-transition useEffect reads these refs instead of re-running clearBM() locally.
@@ -720,7 +728,7 @@ export default function App() {
             if (state.daCash !== undefined) setDaCash(state.daCash);
             if (state.positions) setPositions(state.positions);
             if (state.contracts) setContracts(state.contracts);
-            if (state.daPositions) setDaPositions(state.daPositions);
+            if (state.daPositions?.[id]) setDaPositions(state.daPositions[id]);
             if (state.imbalancePenalty !== undefined) setImbalancePenalty(state.imbalancePenalty);
             if (state.earnedAchievements) setEarnedAchievements(state.earnedAchievements);
             if (state.gameMode) setGameMode(state.gameMode);
@@ -1085,12 +1093,22 @@ export default function App() {
         return next;
       });
 
-      // Apply my position delta(s) and show toast
+      // Apply my position delta(s) per SP and show toast.
+      // Uses per-SP deltas from server summary to correctly update all 48 SP slots —
+      // the old setContractPosition(prev + netDelta) only patched the current SP slot.
       const myIdSum = serverIdSummaries[id];
       if (myIdSum && myIdSum.mwMatched > 0) {
-        // Sum position deltas across all SPs to get the net position change
-        const netDelta = Object.values(myIdSum.positionDeltas || {}).reduce((a, v) => a + v, 0);
-        if (netDelta !== 0) setContractPosition(prev => prev + netDelta);
+        const posDeltas = myIdSum.positionDeltas || {};
+        if (Object.keys(posDeltas).length > 0) {
+          setPositions(prev => {
+            const next = [...prev];
+            for (const [spStr, delta] of Object.entries(posDeltas)) {
+              const idx = Number(spStr) - 1;
+              if (idx >= 0 && idx < 48) next[idx] = (next[idx] || 0) + delta;
+            }
+            return next;
+          });
+        }
         addToast({
           emoji: "🤝",
           title: "ID Trade Executed",
