@@ -236,8 +236,12 @@ describe("Pro-Rata Allocation at Marginal Price", () => {
 
     const result = clearDA(bids, market);
     
-    // Total allocation should equal demand (100 MW)
-    const totalAllocated = (result.accepted_bids || []).reduce((sum, b) => sum + (b.mwAcc || 0), 0);
+    // accepted_bids contains both supply (offer) and demand (bid) entries.
+    // Total supply allocated must equal demand volume (100 MW).
+    // Filter to offers only — demand entries are also present but represent the buy side.
+    const totalAllocated = (result.accepted_bids || [])
+      .filter(b => b.side === "offer")
+      .reduce((sum, b) => sum + (b.mwAcc || 0), 0);
     expect(totalAllocated).toBeCloseTo(100, 2);
   });
 });

@@ -235,20 +235,22 @@ describe("Zero & Negative Pricing", () => {
       isShort: false,
     };
 
-    // Bids in oversupply: renewables bid low/negative
+    // Bids in oversupply: renewables bid low/negative.
+    // TRADER volume (80) < WIND supply (100) so the crossing happens at the
+    // first supply step (price = -50, supMW = 100 >= demand 80) and cp = -50.
     const bids = [
       { id: "WIND_1", side: "offer", mw: 100, price: -50 }, // Pay to run
       { id: "GEN_1", side: "offer", mw: 50, price: 20 },
-      { id: "TRADER", side: "bid", mw: 120, price: -10 }, // Will consume at -£10 profit
+      { id: "TRADER", side: "bid", mw: 80, price: -10 },   // Cleared against WIND at -50
     ];
 
-    // clearDA should handle negative and zero prices
+    // clearDA should handle negative and zero prices without throwing
     const result = clearDA(bids, overSupply);
     
     // Should clear some volume
-    expect(result.volume).toBeGreaterThanOrEqual(0);
-    // Clearing price should be realistic (negative is OK)
-    expect(result.cp).toBeLessThanOrEqual(50);
+    expect(result.volume).toBeGreaterThan(0);
+    // Clearing price is -50 (WIND marginal price), well below 0
+    expect(result.cp).toBeLessThanOrEqual(0);
   });
 
   /**
