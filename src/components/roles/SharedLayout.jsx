@@ -60,7 +60,7 @@ export default function SharedLayout({
     // Market state safe fallback
     const currentMkt = market?.actual || market?.forecast || { niv: 0, sbp: 50, ssp: 50, freq: 50 };
     const { niv, freq, sbp, ssp, isShort } = currentMkt;
-    const totalPL = (cash || 0) + (daCash || 0);
+    const totalPL = (cash || 0);
     const playerCount = leaderboard?.filter(p => p.role !== "instructor")?.length || 0;
 
     // Phase colour + accessible text label (used by automated tests)
