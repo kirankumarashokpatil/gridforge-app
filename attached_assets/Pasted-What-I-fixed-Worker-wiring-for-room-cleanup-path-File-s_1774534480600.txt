@@ -1,0 +1,52 @@
+What I fixed
+
+Worker wiring for room cleanup path
+File: server.py
+Change:
+Imported set_worker from rooms routes.
+Called set_worker(worker) during app lifespan startup.
+Why:
+Ensures room delete path has access to the live RoomWorker for proper in-memory cleanup.
+IDA bid mutation now lock-protected
+File: room_worker.py
+Change:
+Wrapped _cmd_ida_bid in async with self._get_advance_lock(room_id).
+Why:
+Prevents race conditions between IDA bid submit and phase/clear transitions.
+Events routes now preserve intended HTTP errors
+File: events.py
+Change:
+Added explicit except HTTPException: raise in both endpoints.
+Why:
+Prevents 422 validation errors from being incorrectly transformed into 500 responses.
+Bid rate limiter is now room-scoped
+File: bids.py
+Change:
+_check_rate_limit now keys by room_id:player_id.
+Updated all call sites (put_bm_bid, put_da_bid, put_da_curve, put_id_bid).
+Why:
+Avoids cross-room throttling collisions for the same player id.
+Removed silent DA/ID engine-sync failures
+File: bids.py
+Change:
+DA and ID in-memory sync exceptions now fail request with HTTP 500 instead of being swallowed.
+Why:
+Prevents DB/engine divergence where DB accepts a bid but in-memory orderbook misses it.
+Validation done
+
+Compiled successfully:
+server.py
+room_worker.py
+events.py
+bids.py
+Diagnostics:
+No editor errors in patched files.
+What remains from the broader review (not yet changed in this pass)
+
+DA-curve clear timing/snapshot race between submissions and clear window.
+room creation transactional consistency improvements (if you want stricter multi-process guarantees).
+stricter/explicit handling of unknown keys in room meta update.
+If you want, I’ll do a second pass now to address those remaining items too.
+
+Implemented and validated the requested fixes from the review: wired set_worker during server startup, added per-room lock protection for IDA bid mutation, preserved route validation semantics in events.py by re-raising HTTPException, scoped bid rate limiting to room_id + player_id, and converted DA/ID engine-sync silent failures into explicit HTTP 500 errors to prevent DB/engine divergence. Compilation and diagnostics passed for all edited files.
+
