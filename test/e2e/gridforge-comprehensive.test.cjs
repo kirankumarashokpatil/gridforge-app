@@ -43,21 +43,22 @@
 'use strict';
 
 const puppeteer = require('puppeteer');
+const { spawn } = require('child_process');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
-const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:5173';
+const BASE_URL = process.env.GRIDFORGE_URL || 'http://localhost:3000';
 const ROOM_CODE = 'COMP' + Date.now().toString().slice(-6);
 const HEADLESS = process.env.HEADLESS !== 'false';
 const SLOW_MO = parseInt(process.env.SLOW_MO || '0', 10);
 
 // ─── Role definitions ─────────────────────────────────────────────────────────
 const ROLES = [
-    { name: 'NESO_Op', roleLabel: 'System Operator', isHost: true, needsAsset: false, assetName: null },
-    { name: 'GenCo', roleLabel: 'Generator', isHost: false, needsAsset: true, assetName: 'OCGT' },
-    { name: 'PowerSupply', roleLabel: 'Supplier', isHost: false, needsAsset: false, assetName: null },
-    { name: 'TraderJoe', roleLabel: 'Trader', isHost: false, needsAsset: false, assetName: null },
-    { name: 'BatteryOp', roleLabel: 'Battery Storage', isHost: false, needsAsset: true, assetName: 'BESS' },
-    { name: 'FlexLoad', roleLabel: 'Demand Controller', isHost: false, needsAsset: true, assetName: 'DSR' },
+    { name: 'NESO_Op',     roleLabel: 'System Operator',   roleId: 'NESO',      isHost: true,  needsAsset: false, assetName: null,   assetKey: null    },
+    { name: 'GenCo',       roleLabel: 'Generator',         roleId: 'GENERATOR', isHost: false, needsAsset: true,  assetName: 'OCGT', assetKey: 'OCGT'  },
+    { name: 'PowerSupply', roleLabel: 'Supplier',          roleId: 'SUPPLIER',  isHost: false, needsAsset: false, assetName: null,   assetKey: null    },
+    { name: 'TraderJoe',   roleLabel: 'Trader',            roleId: 'TRADER',    isHost: false, needsAsset: false, assetName: null,   assetKey: null    },
+    { name: 'BatteryOp',  roleLabel: 'Battery Storage',   roleId: 'BESS',      isHost: false, needsAsset: true,  assetName: 'BESS', assetKey: 'BESS_M'},
+    { name: 'FlexLoad',   roleLabel: 'Demand Controller', roleId: 'DSR',       isHost: false, needsAsset: true,  assetName: 'DSR',  assetKey: 'DSR'   },
     // Interconnector removed – automatic system asset, not a browser participant
 ];
 
@@ -220,98 +221,107 @@ async function selectTab(page, tabLabel) {
     await sleep(300);
 }
 
-// ─── Join flow ────────────────────────────────────────────────────────────────
-async function joinGame(page, cfg, retries = 2) {
-    const { name, roleLabel, needsAsset, assetName } = cfg;
-    console.log(`\n[${name}] Joining as ${roleLabel}…`);
+// ─── Gun relay (no longer needed — app uses FastAPI WebSocket) ─────────────────
+function startGunRelay() {
+    console.log('  [Setup] Skipping Gun relay (app uses FastAPI WebSocket)');
+    return Promise.resolve(null);
+}
 
-    try {
-        await page.goto(BASE_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-        await waitFor(page, () => document.body.textContent.includes('Online'), 30000);
+// ─── NESO-authority waiting room helpers ───────────────────────────────────
+async function enterLobby(page, playerName) {
+    await page.goto(BASE_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+    await waitFor(page, () => document.body.textContent.includes('Online') || document.querySelector('input') !== null, 20000);
+    await fillPlaceholder(page, 'e.g. Alice', playerName);
+    await page.evaluate(() => {
+        const el = document.querySelector('input[placeholder="e.g. ALPHA"]');
+        if (el) { el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); }
+    });
+    await fillPlaceholder(page, 'e.g. ALPHA', ROOM_CODE);
+    await clickButton(page, 'JOIN WAITING ROOM');
+    await waitFor(page, () =>
+        document.body.textContent.includes('PLAYERS IN ROOM') ||
+        document.body.textContent.includes('NESO CONTROL') ||
+        document.body.textContent.includes('YOUR ASSIGNMENT')
+    , 20000);
+}
 
-        // Name
-        await fillPlaceholder(page, 'e.g. Alice', name);
+async function waitForAllPlayersInRoom(nesoPage, count) {
+    await waitFor(nesoPage, n =>
+        parseInt((document.body.textContent.match(/PLAYERS IN ROOM \((\d+)\)/) || [0, 0])[1], 10) >= n
+    , 45000, count);
+    const actual = await nesoPage.evaluate(() =>
+        parseInt((document.body.textContent.match(/PLAYERS IN ROOM \((\d+)\)/) || [0, 0])[1], 10)
+    );
+    console.log(`  [NESO] Sees ${actual}/${count} players`);
+}
 
-        // Room code (clear first)
-        await page.evaluate(() => {
-            const el = document.querySelector('input[placeholder="e.g. ALPHA"]');
-            if (el) { el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); }
-        });
-        await fillPlaceholder(page, 'e.g. ALPHA', ROOM_CODE);
+async function playerSetPreferredRole(page, roleId) {
+    await page.evaluate(rid => {
+        const btn = document.querySelector(`[data-testid="role-${rid}"]`);
+        if (btn) btn.click();
+    }, roleId);
+}
 
-        // Enter waiting room
-        await clickButton(page, 'JOIN WAITING ROOM');
+async function nesoAssignRole(nesoPage, playerName, roleId) {
+    // Wait for the host UI dropdown to appear in this player's card (guards isHost race)
+    await nesoPage.waitForFunction((pName) => {
+        const card = document.querySelector(`[data-player-name="${pName}"]`);
+        return card && card.querySelector('[data-testid="role-assign-select"]') !== null;
+    }, { timeout: 12000 }, playerName).catch(() => {});
+    const ok = await nesoPage.evaluate((pName, rId) => {
+        const card = document.querySelector(`[data-player-name="${pName}"]`);
+        if (!card) return `NO_CARD:${pName}`;
+        const sel = card.querySelector('[data-testid="role-assign-select"]');
+        if (!sel) return 'NO_SELECT';
+        if (sel.disabled) return 'DISABLED';
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+        setter.call(sel, rId);
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return 'OK';
+    }, playerName, roleId);
+    if (ok !== 'OK') console.warn(`  [NESO] assignRole: ${ok} (${playerName})`);
+    await sleep(600);
+    return ok === 'OK';
+}
 
-        // Role cards
-        await waitFor(page, () =>
-            Array.from(document.querySelectorAll('button'))
-                .some(b => b.textContent.includes('Generator')), 30000);
+async function nesoAssignAsset(nesoPage, playerName, assetKey) {
+    await nesoPage.waitForFunction(pName => {
+        const card = document.querySelector(`[data-player-name="${pName}"]`);
+        return card && card.querySelector('[data-testid="asset-assign-select"]') !== null;
+    }, { timeout: 8000 }, playerName).catch(() => {});
+    const ok = await nesoPage.evaluate((pName, aKey) => {
+        const card = document.querySelector(`[data-player-name="${pName}"]`);
+        if (!card) return `NO_CARD:${pName}`;
+        const sel = card.querySelector('[data-testid="asset-assign-select"]');
+        if (!sel) return 'NO_ASSET_SELECT';
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+        setter.call(sel, aKey);
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return 'OK';
+    }, playerName, assetKey);
+    if (ok !== 'OK') console.warn(`  [NESO] assignAsset: ${ok} (${playerName})`);
+    await sleep(600);
+    return ok === 'OK';
+}
 
-        // Select role — click the card whose text most precisely matches
-        await page.evaluate(label => {
-            const btns = Array.from(document.querySelectorAll('button'));
-            const exact = btns.find(b => b.textContent.trim().includes(label)
-                && b.style && b.style.cursor !== 'not-allowed');
-            if (exact) exact.click();
-        }, roleLabel);
-        await sleep(800);
+async function playerClickReady(page, playerName, timeout = 30000) {
+    await waitFor(page, () =>
+        document.body.textContent.includes('Confirmed by NESO') ||
+        document.body.textContent.includes('NOT READY (click to ready)')
+    , timeout);
+    await clickButton(page, 'NOT READY (click to ready)', 15000);
+    await waitFor(page, () => document.body.textContent.includes('\u2713 READY'), 10000);
+    console.log(`  [${playerName}] Confirmed READY`);
+}
 
-        // Proceed (START GAME / SELECT ASSET / JOIN GAME)
-        let found = null;
-        for (let i = 0; i < 20; i++) {
-            found = await page.evaluate(() => {
-                const btns = Array.from(document.querySelectorAll('button'));
-                const start = btns.find(b => b.textContent.includes('START GAME'));
-                const asset = btns.find(b => b.textContent.includes('SELECT ASSET'));
-                const join = btns.find(b => b.textContent.includes('JOIN GAME'));
-                if (start) { start.click(); return 'START'; }
-                if (asset) { asset.click(); return 'ASSET'; }
-                if (join) { join.click(); return 'JOIN'; }
-                return null;
-            });
-            if (found) break;
-            await sleep(800);
-        }
-        if (!found) {
-            const btns = await page.evaluate(() =>
-                Array.from(document.querySelectorAll('button')).map(b => b.textContent.trim()).join(' | '));
-            throw new Error(`Proceed button not found. Buttons: [${btns}]`);
-        }
-        console.log(`[${name}] Proceeded with: ${found}`);
-
-        // Asset selection
-        if (needsAsset) {
-            await waitFor(page, () =>
-                document.body.textContent.includes("choose the asset you'll operate"), 30000);
-
-            await page.evaluate(aName => {
-                const cards = Array.from(document.querySelectorAll('[style*="cursor: pointer"]'));
-                const card = aName
-                    ? cards.find(c => c.textContent.includes(aName))
-                    : cards[0];
-                if (card) card.click();
-            }, assetName);
-            await sleep(1200);
-
-            // Confirm asset
-            await page.evaluate(() => {
-                const btn = Array.from(document.querySelectorAll('button'))
-                    .find(b => b.textContent.includes('CONFIRM & JOIN'));
-                if (btn) btn.click();
-            });
-        }
-
-        // Wait for live game UI (SP counter)
-        await waitFor(page, () => document.body.textContent.includes('/48'), 120000);
-        console.log(`[${name}] ✓ Game UI loaded`);
-
-    } catch (err) {
-        if (retries > 0) {
-            console.warn(`[${name}] Join failed – retrying (${retries} left): ${err.message}`);
-            return joinGame(page, cfg, retries - 1);
-        }
-        throw err;
-    }
+async function nesoStartGameFromWaiting(nesoPage) {
+    await nesoPage.waitForFunction(() => {
+        const btn = Array.from(document.querySelectorAll('button'))
+            .find(b => b.textContent.toUpperCase().includes('START GAME') && !b.disabled);
+        return !!btn;
+    }, { timeout: 20000 });
+    await clickButton(nesoPage, 'START GAME');
+    console.log('  [NESO] START GAME clicked');
 }
 
 // ─── Phase helpers ───────────────────────────────────────────────────────────
@@ -434,72 +444,6 @@ async function nesoAdvance(page, phaseTextOnNESO, retries = 2) {
                 throw e; // Final attempt failed
             }
         }
-    }
-}
-
-/** Discover what state objects are exposed on window for debugging. */
-async function discoverStateObjects(page) {
-    try {
-        const discovery = await page.evaluate(() => {
-            const result = {
-                windowGunState: typeof window.gunState,
-                windowGameState: typeof window.gameState,
-                windowAppState: typeof window.appState,
-                windowGameDataVars: [],
-                foundPhaseIn: [],
-                gunDbInfo: {}
-            };
-
-            // Check for objects containing 'phase' property
-            try {
-                for (const key of Object.keys(window)) {
-                    try {
-                        const val = window[key];
-                        if (val && typeof val === 'object') {
-                            if ('phase' in val) {
-                                result.foundPhaseIn.push(key);
-                            }
-                            if (key.toLowerCase().includes('gun') ||
-                                key.toLowerCase().includes('gun') ||
-                                key.toLowerCase().includes('state')) {
-                                result.windowGameDataVars.push(`${key}: ${typeof val}`);
-                            }
-                        }
-                    } catch (e) { }
-                }
-            } catch (e) { }
-
-            // Check GunDB structure if available
-            if (typeof window.Gun !== 'undefined') {
-                result.gunDbInfo.gunExists = true;
-            }
-            if (typeof window.GUN !== 'undefined') {
-                result.gunDbInfo.GUNexists = true;
-            }
-
-            // Check React DevTools or app root state
-            try {
-                const root = document.querySelector('#root');
-                if (root && root._react) {
-                    result.gunDbInfo.reactRootFound = true;
-                }
-            } catch (e) { }
-
-            return result;
-        });
-
-        console.log('\n[STATE DISCOVERY]');
-        console.log(`  window.gunState type: ${discovery.windowGunState}`);
-        console.log(`  window.gameState type: ${discovery.windowGameState}`);
-        console.log(`  window.appState type: ${discovery.windowAppState}`);
-        console.log(`  Objects with 'phase' property: ${discovery.foundPhaseIn.join(', ') || 'none'}`);
-        console.log(`  Game/state variables: ${discovery.windowGameDataVars.slice(0, 5).join(', ') || 'none'}`);
-        console.log(`  GunDB info: ${JSON.stringify(discovery.gunDbInfo)}`);
-
-        return discovery;
-    } catch (e) {
-        console.log(`[STATE DISCOVERY] Error: ${e.message}`);
-        return null;
     }
 }
 
@@ -753,7 +697,9 @@ async function fillAndSubmit(page, numInputs, submitButtonFragment, successTextT
 
 // --- Generator ---
 async function genDA(page) {
-    // Generator DA: Power (MW) and Price (£)
+    // Generator DA: exit curve mode first, then simple MW+price inputs
+    await clickButton(page, 'Simple Mode').catch(() => {});
+    await sleep(400);
     await fillAndSubmit(page, 2, 'SUBMIT DA OFFER', null);
 }
 
@@ -769,7 +715,11 @@ async function genBM(page) {
 
 // --- Supplier ---
 async function supDA(page) {
-    // Supplier DA: Purchase volume and price
+    // Supplier defaults to Simple Mode — wait for DA inputs to be enabled (disabled={!isDa})
+    await page.waitForFunction(
+        () => Array.from(document.querySelectorAll('input[type="number"]:not([disabled])')).length >= 2,
+        { timeout: 30000 }
+    );
     await fillAndSubmit(page, 2, 'SUBMIT DA PURCHASE', null);
 }
 
@@ -796,9 +746,11 @@ async function traderID(page) {
 
 // --- BESS ---
 async function bessDA(page) {
-    // BESS DA: discharge schedule
+    // BESS DA: exit curve mode first, then discharge schedule
+    await clickButton(page, 'Simple Mode').catch(() => {});
+    await sleep(400);
     await clickButton(page, 'SELL (Discharge Battery)');
-    await sleep(1000);
+    await sleep(600);
     await fillAndSubmit(page, 2, 'SUBMIT DA SCHEDULE', null);
 }
 
@@ -827,9 +779,16 @@ async function bessBM(page) {
 
 // --- DSR ---
 async function dsrDA(page) {
-    // DSR DA: curtailment schedule
-    await clickButton(page, 'SELL (Curtail Demand)');
-    await sleep(1000);
+    // DSR has no curve mode — wait for SELL button to be enabled (rendered when isDa = true)
+    await page.waitForFunction(
+        () => !!Array.from(document.querySelectorAll('button:not([disabled])')).find(b => b.textContent.includes('SELL (Curtail Demand)')),
+        { timeout: 30000 }
+    );
+    await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('button:not([disabled])')).find(b => b.textContent.includes('SELL (Curtail Demand)'));
+        if (btn) btn.click();
+    });
+    await sleep(600);
     await fillAndSubmit(page, 2, 'SUBMIT DA SCHEDULE', null);
 }
 
@@ -841,20 +800,38 @@ async function dsrID(page) {
 }
 
 async function dsrBM(page) {
-    // DSR BM: curtailment or payback bid (button text varies with grid state)
-    // When grid is long (not short): "OFFER CURTAILMENT →"
-    // When grid is short: "VOLUNTARY EARLIER PAYBACK →"
-    // Use data-testid for reliability
-    const btnFragment = await page.evaluate(() => {
-        const btn = document.querySelector('[data-testid="dsr-submit-bm"]');
-        if (btn) return btn.textContent.trim().substring(0, 30);
-        // Fallback: find any enabled button with relevant text
-        const btns = Array.from(document.querySelectorAll('button:not([disabled])'));
-        const match = btns.find(b => b.textContent.includes('CURTAILMENT') || b.textContent.includes('PAYBACK'));
-        return match ? match.textContent.trim().substring(0, 30) : 'CURTAILMENT';
+    // DSR is a pure BM player — no DA/ID curtailment → no rebound → inputs enabled
+    // Wait for the dsr-bm-mw input to not be disabled (45s — DSR is the last browser)
+    await page.waitForFunction(
+        () => {
+            const inp = document.querySelector('input[data-testid="dsr-bm-mw"]');
+            return inp && !inp.disabled;
+        },
+        { timeout: 45000 }
+    ).catch(async () => {
+        const diag = await page.evaluate(() => {
+            const inp = document.querySelector('input[data-testid="dsr-bm-mw"]');
+            const btn = document.querySelector('button[data-testid="dsr-submit-bm"]');
+            return {
+                inputExists: !!inp, inputDisabled: inp ? inp.disabled : 'N/A',
+                btnExists: !!btn, btnDisabled: btn ? btn.disabled : 'N/A',
+                bodySnippet: document.body.textContent.slice(0, 200)
+            };
+        }).catch(e => ({ error: e.message }));
+        console.warn('  [DSR BM] Input still disabled after 45s:', JSON.stringify(diag));
+        throw new Error('DSR BM inputs never enabled: ' + JSON.stringify(diag));
     });
-    console.log(`    [dsrBM] Detected button fragment: "${btnFragment}"`);
-    await fillAndSubmit(page, 2, btnFragment, null);
+    // Atomic fill + click
+    await page.evaluate((mw, price) => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        const mwInp = document.querySelector('input[data-testid="dsr-bm-mw"]');
+        const priceInp = document.querySelector('input[data-testid="dsr-bm-price"]');
+        if (mwInp) { setter.call(mwInp, mw); mwInp.dispatchEvent(new Event('input', { bubbles: true })); }
+        if (priceInp) { setter.call(priceInp, price); priceInp.dispatchEvent(new Event('input', { bubbles: true })); }
+        const b = document.querySelector('button[data-testid="dsr-submit-bm"]');
+        if (b) b.click();
+    }, 15, 40);
+    await sleep(200);
 }
 
 // --- Interconnector ---
@@ -1075,47 +1052,110 @@ async function verifyButtonLockout(page, playerName, submitButtonFragment) {
     // index shortcuts for pages (interconnector removed)
     const [iNESO, iGEN, iSUP, iTRAD, iBESS, iDSR] = [0, 1, 2, 3, 4, 5];
 
+    let gunRelayProcess = null;
     try {
-        // ════════════════════════════════════════════════════════════════
-        // PHASE 0 – Launch browsers & join
-        // ════════════════════════════════════════════════════════════════
-        console.log('─── Phase 0: Join All Players ──────────────────────────────');
+        gunRelayProcess = await startGunRelay();
 
+        // ════════════════════════════════════════════════════════════════
+        // PHASE 0 – Launch browsers & join (NESO-authority flow)
+        // ════════════════════════════════════════════════════════════════
+        console.log('─── Phase 0: Join All Players (NESO-Authority Flow) ──────────────');
+
+        // 1. Launch all browsers
         for (const cfg of ROLES) {
             const browser = await puppeteer.launch({
                 headless: HEADLESS ? 'new' : false,
                 slowMo: SLOW_MO,
-                args: ['--no-sandbox', '--disable-setuid-sandbox'],
+                protocolTimeout: 60000,
+                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
             });
             browsers.push(browser);
             const page = await browser.newPage();
             await page.setViewport({ width: 1440, height: 900 });
-            // Forward browser errors to console
-            page.on('console', msg => {
-                if (msg.type() === 'error') {
-                    console.log(`  [BROWSER][${cfg.name}] ${msg.text()}`);
-                }
-            });
+            page.on('console', msg => { if (msg.type() === 'error') console.log(`  [BROWSER][${cfg.name}] ${msg.text()}`); });
             pages.push(page);
         }
 
-        // Join sequentially to avoid race on room host detection
-        for (let i = 0; i < ROLES.length; i++) {
-            try {
-                await joinGame(pages[i], ROLES[i]);
-                pass(`Join: ${ROLES[i].name} (${ROLES[i].roleLabel})`);
+        // 2. NESO joins first to claim host slot
+        try {
+            await enterLobby(pages[iNESO], ROLES[iNESO].name);
+            await waitFor(pages[iNESO], () =>
+                document.body.textContent.includes('NESO CONTROL') ||
+                document.body.textContent.includes('ROOM AUTHORITY'), 20000);
+            pass(`Join: ${ROLES[iNESO].name} confirmed as NESO host`);
+        } catch (e) { fail(`Join: ${ROLES[iNESO].name}`, e); }
 
-                // ── CRITICAL: Pause the game immediately to prevent auto-timer from cycling phases ──
-                if (i === iNESO) {
-                    console.log('\n─── Pausing Game to Control Phase Timing ───────────────────');
-                    await sleep(2000);
-                    await pauseGame(pages[iNESO]);
-                    await sleep(2000); // Let pause propagate via GunDB to all clients
-                }
-            } catch (e) {
-                fail(`Join: ${ROLES[i].name}`, e);
-            }
+        await sleep(3000); // allow host record to propagate via relay
+
+        // 3. Other players join in parallel
+        await Promise.all(ROLES.slice(1).map(async (cfg, idx) => {
+            const i = idx + 1;
+            try {
+                await enterLobby(pages[i], cfg.name);
+                pass(`Join: ${cfg.name} entered waiting room`);
+            } catch (e) { fail(`Join: ${cfg.name}`, e); }
+        }));
+        await sleep(2000);
+
+        // 4. Non-host players set preferred roles
+        for (let i = 1; i < ROLES.length; i++) {
+            await playerSetPreferredRole(pages[i], ROLES[i].roleId).catch(() => {});
         }
+        await sleep(2000);
+
+        // 5. NESO waits for all players, then assigns roles + assets
+        try {
+            await waitForAllPlayersInRoom(pages[iNESO], ROLES.length);
+            pass('NESO sees all players');
+        } catch (e) { fail('NESO player count', e); }
+
+        // Guard: wait for NESO's host UI (role dropdowns) to be visible before assigning
+        await pages[iNESO].waitForFunction(
+            () => document.querySelectorAll('[data-testid="role-assign-select"]').length > 0,
+            { timeout: 15000 }
+        ).catch(() => console.warn('  [NESO] Host dropdowns not visible yet — proceeding anyway'));
+
+        for (let i = 1; i < ROLES.length; i++) {
+            const cfg = ROLES[i];
+            try {
+                await nesoAssignRole(pages[iNESO], cfg.name, cfg.roleId);
+                if (cfg.assetKey) {
+                    await nesoAssignAsset(pages[iNESO], cfg.name, cfg.assetKey);
+                    pass(`Assigned: ${cfg.name} → ${cfg.roleId} + ${cfg.assetKey}`);
+                } else {
+                    pass(`Assigned: ${cfg.name} → ${cfg.roleId}`);
+                }
+            } catch (e) { fail(`Assign: ${cfg.name}`, e); }
+        }
+
+        // 6. Non-host players click READY
+        await Promise.all(ROLES.slice(1).map(async (cfg, idx) => {
+            const i = idx + 1;
+            try {
+                await playerClickReady(pages[i], cfg.name);
+                pass(`Ready: ${cfg.name}`);
+            } catch (e) { fail(`Ready: ${cfg.name}`, e); }
+        }));
+
+        // 7. NESO starts game
+        try {
+            await nesoStartGameFromWaiting(pages[iNESO]);
+            pass('NESO started game');
+        } catch (e) { fail('NESO start game', e); }
+
+        // 8. Wait for all game UIs to load
+        for (let i = 0; i < pages.length; i++) {
+            try {
+                await waitFor(pages[i], () => document.body.textContent.includes('/48'), 30000);
+                pass(`Game UI: ${ROLES[i].name}`);
+            } catch (e) { fail(`Game UI: ${ROLES[i].name}`, e); }
+        }
+
+        // Pause immediately to control phase timing
+        console.log('\n─── Pausing Game to Control Phase Timing ─────────────────────────────────');
+        await sleep(2000);
+        await pauseGame(pages[iNESO]);
+        await sleep(2000);
 
         // ── Initial sync check ──
         console.log('\n─── Initial State Verification ────────────────────────────');
@@ -1205,15 +1245,7 @@ async function verifyButtonLockout(page, playerName, submitButtonFragment) {
         catch (e) { fail('Supplier: DA', e); }
         await sleep(500);
 
-        // DSR DA (moved earlier to beat phase advance)
-        try {
-            await dsrDA(pages[iDSR]);
-            pass('DSR: DA schedule locked');
-            // ✅ NEW ASSERTION: Button Lockout after submit
-            await verifyButtonLockout(pages[iDSR], 'DSR', 'SUBMIT DA SCHEDULE');
-        }
-        catch (e) { fail('DSR: DA', e); }
-        await sleep(500);
+        // DSR is a pure BM player — skip DA submission (curtailment triggers rebound, blocks BM inputs)
 
         // Trader DA (needs tab switch)
         try {
@@ -1298,15 +1330,7 @@ async function verifyButtonLockout(page, playerName, submitButtonFragment) {
         catch (e) { fail('BESS: ID', e); }
         await sleep(500);
 
-        // DSR ID
-        try {
-            await dsrID(pages[iDSR]);
-            pass('DSR: ID order published');
-            // ✅ NEW ASSERTION: Button Lockout after submit
-            await verifyButtonLockout(pages[iDSR], 'DSR', 'SUBMIT ID ORDER');
-        }
-        catch (e) { fail('DSR: ID', e); }
-        await sleep(500);
+        // DSR is a pure BM player — skip ID submission (curtailment triggers rebound, blocks BM inputs)
 
         // IC: no manual ID submission
         try {
@@ -1611,6 +1635,10 @@ async function verifyButtonLockout(page, playerName, submitButtonFragment) {
         console.log('══════════════════════════════════════════════════════════════\n');
 
         for (const b of browsers) await b.close().catch(() => { });
+        if (gunRelayProcess) {
+            console.log('\n  [Cleanup] Shutting down Gun relay server...');
+            gunRelayProcess.kill('SIGKILL');
+        }
     }
 
     process.exit(results.failed.length > 0 ? 1 : 0);

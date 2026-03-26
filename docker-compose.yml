@@ -1,0 +1,72 @@
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    container_name: gridforge-db
+    environment:
+      POSTGRES_DB: gridforge
+      POSTGRES_USER: gridforge
+      POSTGRES_PASSWORD: gridforge123
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gridforge -d gridforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Redis (message bus between gateway ↔ room workers)
+  redis:
+    image: redis:7-alpine
+    container_name: gridforge-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # GridForge FastAPI Backend
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gridforge-api
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: gridforge
+      DB_PASSWORD: gridforge123
+      DB_NAME: gridforge
+      REDIS_URL: redis://redis:6379/0
+      PORT: 8000
+      ENV: production
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # GridForge Frontend (Vite → nginx + reverse proxy)
+  app:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: runner
+    container_name: gridforge-app
+    environment:
+      NODE_ENV: production
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  pgdata:
